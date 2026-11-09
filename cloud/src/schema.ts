@@ -141,4 +141,36 @@ export const MIGRATIONS: string[] = [
   -- Minutes after a page before this method is used: push first, the siren if nobody has answered.
   ALTER TABLE contact_methods ADD COLUMN delay_min INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- Whether a responder may send customer notices. Admins always may.
+  ALTER TABLE users ADD COLUMN can_notify_customers INTEGER NOT NULL DEFAULT 0;
+  -- The last delivery problem of a method, cleared by its next success: what the alarm check shows.
+  ALTER TABLE contact_methods ADD COLUMN last_error TEXT;
+  ALTER TABLE contact_methods ADD COLUMN last_error_at INTEGER;
+  ALTER TABLE contact_methods ADD COLUMN last_ok_at INTEGER;
+
+  -- People outside the team. service_id NULL means every service. type: webhook | slack | ntfy.
+  CREATE TABLE customers (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    type        TEXT NOT NULL,
+    config      TEXT NOT NULL,
+    service_id  TEXT REFERENCES services(id) ON DELETE CASCADE,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  INTEGER NOT NULL
+  );
+  CREATE INDEX customers_service ON customers (service_id);
+
+  CREATE TABLE customer_notices (
+    id           TEXT PRIMARY KEY,
+    incident_id  TEXT NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+    actor        TEXT NOT NULL,
+    message      TEXT NOT NULL,
+    audience     INTEGER NOT NULL,
+    dry_run      INTEGER NOT NULL,
+    created_at   INTEGER NOT NULL
+  );
+  CREATE INDEX customer_notices_incident ON customer_notices (incident_id, created_at);
+  CREATE INDEX customer_notices_at ON customer_notices (created_at);
+  `,
 ];

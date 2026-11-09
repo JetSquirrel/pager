@@ -24,7 +24,7 @@ function keyBytes(base64) {
 }
 
 async function pushState() {
-  const state = { supported: pushSupported(), ios: isIos(), standalone: standalone(), endpoint: null };
+  const state = { supported: pushSupported(), ios: isIos(), standalone: standalone(), endpoint: null, permission: "Notification" in window ? Notification.permission : "unsupported" };
   if (!state.supported) return state;
   try {
     const reg = await navigator.serviceWorker.getRegistration("./");

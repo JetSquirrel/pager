@@ -34,6 +34,7 @@ export interface PushState {
   ios: boolean;
   standalone: boolean;
   endpoint: string | null;
+  permission?: "granted" | "denied" | "default" | "unsupported";
 }
 
 export type PushSubscribed = { endpoint: string; keys: { p256dh: string; auth: string }; label: string } | { error: string };

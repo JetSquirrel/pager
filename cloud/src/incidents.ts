@@ -209,8 +209,9 @@ export async function addNote(env: Env, incident: Incident, actor: string, messa
   await broadcast(env, "incident.updated", incident);
 }
 
-export async function notifyUsers(env: Env, incident: Incident, userIds: string[], event: NotifyEvent) {
-  await enqueue(env, incident, userIds, event);
+/** Returns how many of these people something can reach. */
+export async function notifyUsers(env: Env, incident: Incident, userIds: string[], event: NotifyEvent): Promise<number> {
+  return enqueue(env, incident, userIds, event);
 }
 
 export async function broadcast(env: Env, type: string, incident: Incident) {

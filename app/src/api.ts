@@ -8,6 +8,7 @@ export interface User {
   email: string;
   name: string;
   role: "admin" | "responder";
+  can_notify_customers?: number;
 }
 
 export interface Incident {
@@ -68,6 +69,7 @@ export interface ContactMethod {
   min_severity: Severity;
   enabled: boolean;
   delay_min: number;
+  last_error: string | null;
 }
 
 export interface Service {
@@ -95,6 +97,25 @@ export interface ScheduleDef {
   id: string;
   name: string;
   rotation: { start: number; shift_hours: number; users: string[] };
+}
+
+export type CustomerChannel = "webhook" | "slack" | "ntfy";
+
+export interface Customer {
+  id: string;
+  name: string;
+  type: CustomerChannel;
+  config: Record<string, unknown>;
+  service_id: string | null;
+  enabled: boolean;
+}
+
+export interface CustomerNotice {
+  id: string;
+  message: string;
+  audience: number;
+  dry_run: number;
+  created_at: number;
 }
 
 export interface UsageToday {
@@ -167,11 +188,18 @@ export class Api {
 
   pushKey = () => this.call<{ publicKey: string }>("GET", "/push/vapid");
 
+  customerNotices = (id: string) => this.call<{ audience: number; live: boolean; allowed: boolean; notices: CustomerNotice[] }>("GET", `/incidents/${id}/customer-notices`);
+  sendCustomerNotice = (id: string, message: string) => this.call<{ id: string; audience: number; dry_run: boolean }>("POST", `/incidents/${id}/customer-notices`, { message });
+
   // ---- admin
   usage = () => this.call<UsageToday>("GET", "/usage");
   users = () => this.call<{ users: User[] }>("GET", "/users");
   addUser = (u: { email: string; name: string; role: "admin" | "responder" }) =>
     this.call<{ user_id: string; token: string }>("POST", "/users", u);
+  updateUser = (id: string, patch: { role?: "admin" | "responder"; can_notify_customers?: boolean }) => this.call<{ ok: true }>("PATCH", `/users/${id}`, patch);
+  customers = () => this.call<{ customers: Customer[]; live: boolean }>("GET", "/customers");
+  addCustomer = (c: { name: string; type: CustomerChannel; config: Record<string, unknown>; service_id?: string | null }) => this.call<{ id: string }>("POST", "/customers", c);
+  deleteCustomer = (id: string) => this.call<void>("DELETE", `/customers/${id}`);
   services = () => this.call<{ services: Service[] }>("GET", "/services");
   addService = (s: { name: string; escalation_policy_id: string }) =>
     this.call<{ id: string; integration_key: string }>("POST", "/services", s);

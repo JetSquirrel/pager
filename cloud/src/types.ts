@@ -12,6 +12,8 @@ export interface Bindings {
   ACTION_SECRET?: string;
   TUYA_CLIENT_ID?: string;
   TUYA_CLIENT_SECRET?: string;
+  /** "on" sends customer notices. Anything else, or unset, is a dry run that reaches nobody. */
+  CUSTOMER_NOTIFY?: string;
 }
 
 /** What request code sees inside the Durable Object (src/pager.ts). */
@@ -39,6 +41,7 @@ export interface User {
   email: string;
   name: string;
   role: "admin" | "responder";
+  can_notify_customers: number;
   timezone: string;
   created_at: number;
 }

@@ -6,6 +6,8 @@ import { now, parseJson } from "./util";
 
 const MINUTE = 60_000;
 const RETRY_FAILED_STEP_MS = 30_000;
+/** A critical page that nothing could deliver moves on after this, instead of waiting out the step's delay. */
+const NOBODY_REACHED_MS = 30_000;
 
 /** Turns escalation targets into user ids: users as they are, schedules into whoever is on call at `at`. */
 export async function resolveTargets(env: Env, targets: EscalationTarget[], at = now()): Promise<string[]> {
@@ -159,7 +161,10 @@ async function advance(env: Env, incidentId: string): Promise<void> {
   ]);
 
   const updated = { ...incident, escalation_step: step, assignees, updated_at: t };
-  await notifyUsers(env, updated, users, "trigger");
+  const reached = await notifyUsers(env, updated, users, "trigger");
+  if (reached === 0 && nextDelayMs !== null && incident.severity === "critical") {
+    await env.DB.prepare(`UPDATE escalations SET next_at = ? WHERE incident_id = ?`).bind(t + NOBODY_REACHED_MS, incidentId).run();
+  }
   env.wake();
   if (step > 0) await broadcast(env, "incident.updated", updated);
 }

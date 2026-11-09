@@ -17,6 +17,7 @@ import {
   snooze,
 } from "./incidents";
 import { parseAlertmanager, parseGeneric } from "./ingest";
+import { audienceFor, isEmergency, isLive, mayNotify, sendNotice } from "./notify/customers";
 import { enqueueTest } from "./notify/dispatch";
 import { TUYA_PRESETS, TuyaClient } from "./notify/tuya";
 import { onCallAt, upcomingShifts } from "./oncall";
@@ -71,6 +72,20 @@ app.post("/v1/setup", async (c) => {
     .bind(id, need(b.email, "email"), b.name || b.email, await sha256Hex(token), now())
     .run();
   return c.json({ user_id: id, token }, 201);
+});
+
+/**
+ * Issues a new token for an admin who has lost theirs. A Cloudflare login can always reset BOOTSTRAP_TOKEN
+ * (wrangler secret put), so this is the way back in from any machine. The old token stops working.
+ */
+app.post("/v1/recover", async (c) => {
+  const expected = c.env.BOOTSTRAP_TOKEN;
+  if (!expected || c.req.header("authorization") !== `Bearer ${expected}`) throw new HttpError(401, "bad bootstrap token");
+  const { email } = await body<{ email: string }>(c);
+  const token = newSecret();
+  const r = await c.env.DB.prepare(`UPDATE users SET token_hash = ? WHERE email = ? AND role = 'admin' RETURNING id`).bind(await sha256Hex(token), need(email, "email")).first<{ id: string }>();
+  if (!r) throw new HttpError(404, "no admin with that email");
+  return c.json({ user_id: r.id, token });
 });
 
 // ---------------------------------------------------------------- ingest
@@ -254,6 +269,22 @@ api.post("/incidents/bulk", async (c) => {
   return c.json({ incidents: out });
 });
 
+/** Who a customer notice for this incident would reach, whether it would really be sent, and what has been said so far. */
+api.get("/incidents/:id/customer-notices", async (c) => {
+  const incident = await incidentOr404(c);
+  const [audience, { results }] = await Promise.all([
+    audienceFor(c.env, incident.service_id),
+    c.env.DB.prepare(`SELECT id, message, audience, dry_run, created_at FROM customer_notices WHERE incident_id = ? ORDER BY created_at DESC LIMIT 20`).bind(incident.id).all(),
+  ]);
+  return c.json({ audience: audience.length, live: isLive(c.env), allowed: mayNotify(c.get("user")) && isEmergency(incident), notices: results });
+});
+
+api.post("/incidents/:id/customer-notices", async (c) => {
+  const incident = await incidentOr404(c);
+  const { message } = await body<{ message: string }>(c);
+  return c.json(await sendNotice(c.env, incident, c.get("user"), String(message ?? "")), 201);
+});
+
 /** Manually open an incident on a service (e.g. a customer report). */
 api.post("/incidents", async (c) => {
   const b = await body<{ service_id: string; title: string; severity?: string; details?: Record<string, unknown> }>(c);
@@ -293,7 +324,7 @@ api.get("/oncall", async (c) => {
 // ---- users (admin manages; everyone can list)
 
 api.get("/users", async (c) =>
-  c.json({ users: (await c.env.DB.prepare(`SELECT id, email, name, role, timezone, created_at FROM users ORDER BY name`).all()).results }),
+  c.json({ users: (await c.env.DB.prepare(`SELECT id, email, name, role, can_notify_customers, timezone, created_at FROM users ORDER BY name`).all()).results }),
 );
 
 api.post("/users", requireAdmin, async (c) => {
@@ -306,8 +337,52 @@ api.post("/users", requireAdmin, async (c) => {
   return c.json({ user_id: id, token }, 201);
 });
 
+api.patch("/users/:id", requireAdmin, async (c) => {
+  const b = await body<{ role?: string; can_notify_customers?: boolean }>(c);
+  const id = c.req.param("id");
+  if (b.role !== undefined && b.role !== "admin" && b.role !== "responder") throw new HttpError(400, "role must be admin or responder");
+  if (b.role === "responder") {
+    const admins = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND id != ?`).bind(id).first<{ n: number }>();
+    if (admins!.n === 0) throw new HttpError(409, "this is the last admin");
+  }
+  if (b.role !== undefined) await c.env.DB.prepare(`UPDATE users SET role = ? WHERE id = ?`).bind(b.role, id).run();
+  if (b.can_notify_customers !== undefined) await c.env.DB.prepare(`UPDATE users SET can_notify_customers = ? WHERE id = ?`).bind(b.can_notify_customers ? 1 : 0, id).run();
+  return c.json({ ok: true });
+});
+
 api.delete("/users/:id", requireAdmin, async (c) => {
   await c.env.DB.prepare(`DELETE FROM users WHERE id = ?`).bind(c.req.param("id")).run();
+  return c.body(null, 204);
+});
+
+// ---- customers (people outside the team, reached only by a notice someone chose to send)
+
+const CUSTOMER_TYPES = ["webhook", "slack", "ntfy"];
+
+function redactCustomer(r: any) {
+  const cfg = parseJson<Record<string, unknown>>(r.config, {});
+  for (const k of ["token", "authorization"]) if (cfg[k]) cfg[k] = "••••";
+  return { ...r, enabled: !!r.enabled, config: cfg };
+}
+
+api.get("/customers", requireAdmin, async (c) => {
+  const { results } = await c.env.DB.prepare(`SELECT * FROM customers ORDER BY name`).all();
+  return c.json({ customers: results.map(redactCustomer), live: isLive(c.env) });
+});
+
+api.post("/customers", requireAdmin, async (c) => {
+  const b = await body<{ name: string; type: string; config: unknown; service_id?: string | null }>(c);
+  if (!CUSTOMER_TYPES.includes(b.type)) throw new HttpError(400, `type must be one of ${CUSTOMER_TYPES.join(", ")}`);
+  const config = validateConfig(b.type, b.config);
+  const id = newId("cst");
+  await c.env.DB.prepare(`INSERT INTO customers (id, name, type, config, service_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+    .bind(id, need(b.name, "name").slice(0, 120), b.type, JSON.stringify(config), b.service_id || null, now())
+    .run();
+  return c.json({ id }, 201);
+});
+
+api.delete("/customers/:id", requireAdmin, async (c) => {
+  await c.env.DB.prepare(`DELETE FROM customers WHERE id = ?`).bind(c.req.param("id")).run();
   return c.body(null, 204);
 });
 

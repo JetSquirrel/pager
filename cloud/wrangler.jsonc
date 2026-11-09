@@ -13,7 +13,8 @@
   "durable_objects": { "bindings": [{ "name": "PAGER", "class_name": "Pager" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Pager"] }],
 
-  "vars": { "TUYA_ENDPOINT": "https://openapi.tuyaus.com" }
+  "vars": { "TUYA_ENDPOINT": "https://openapi.tuyaus.com", "CUSTOMER_NOTIFY": "off" }
   // Secrets (wrangler secret put): BOOTSTRAP_TOKEN; TUYA_CLIENT_ID and TUYA_CLIENT_SECRET for Tuya devices.
+  // CUSTOMER_NOTIFY: "off" is a dry run that reaches no customer; "on" really sends. See docs/alarm-permissions.md.
   // Optional var: PUBLIC_URL, when the pager is reached through a custom domain.
 }

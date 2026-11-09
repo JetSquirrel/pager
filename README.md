@@ -113,6 +113,7 @@ All under `/v1`, `Authorization: Bearer <token>`.
 | Method | Path | |
 |---|---|---|
 | POST | `/setup` | First admin (bootstrap token) |
+| POST | `/recover` | New token for an admin who lost theirs (bootstrap token) |
 | POST | `/integrations/{key}/events` · `/alertmanager` · `/grafana` | Ingest (no auth; the key is the secret) |
 | GET/POST | `/actions/{signed}` | One-tap ack/resolve links in notifications |
 | GET | `/me` · POST `/me/rotate-token` | |
@@ -122,6 +123,8 @@ All under `/v1`, `Authorization: Bearer <token>`.
 | GET | `/incidents/{id}` | Incident, timeline, escalation state |
 | POST | `/incidents/{id}/acknowledge` · `/resolve` · `/notes` · `/repage` · `/snooze` · `/reassign` · `/escalate` | |
 | POST | `/incidents/bulk` | Acknowledge or resolve up to 50 at once |
+| GET/POST | `/incidents/{id}/customer-notices` | Tell customers ([rules](docs/alarm-permissions.md)) |
+| GET/POST/DELETE | `/customers` | Admin |
 | GET | `/oncall` | Who is on call now and next |
 | GET/POST/PUT | `/schedules`, `/schedules/{id}/overrides` | Rotations and take-overs |
 | GET/POST/PUT | `/escalation-policies`, `/{id}/preview` | |

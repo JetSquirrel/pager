@@ -1,8 +1,9 @@
 import { effect, resource, Scroll, signal, Text, View } from "nsh";
 import { Input } from "nsh/base";
 import type { IncidentDetail as Detail, IncidentEvent, User } from "../api";
-import { api, incidents, upsert } from "../store";
+import { api, incidents, me, upsert } from "../store";
 import { toast } from "../toast";
+import { CustomerNotice } from "./CustomerNotice";
 import { ActionMenu, Badge, Btn, Chips, clock, Dot, Fact, Failed, field, FormSheet, isDesktop, Loading, MenuBtn, Meta, Section, SEV_LABEL, StatusBadge, Surface, timeAgo, type Tone, until, Value } from "../ui";
 
 const KIND_LABEL: Record<string, string> = {
@@ -19,6 +20,9 @@ const KIND_LABEL: Record<string, string> = {
   reassigned: "Reassigned",
   resolved: "Resolved",
   note: "Note",
+  customer_notice: "Customers notified",
+  customer_notice_dry_run: "Customer notice dry run",
+  customer_notice_failed: "Customer notice failed",
   escalation_failed: "Escalation failed",
 };
 
@@ -28,6 +32,7 @@ const KIND_TONE: Record<string, Tone> = {
   notify_failed: "critical",
   notify_gave_up: "critical",
   escalation_failed: "critical",
+  customer_notice_failed: "critical",
   acknowledged: "warning",
   resolved: "ok",
 };
@@ -61,6 +66,8 @@ export function IncidentDetail(props: { id: string }) {
   const note = signal("");
   const busy = signal<string | null>(null);
   const reassigning = signal(false);
+  const noticing = signal(false);
+  const mayNotify = () => me()?.role === "admin" || !!me()?.can_notify_customers;
   const people = resource(() => reassigning() || null, async () => (await api().users()).users);
 
   // A live update reloads the timeline: at once for a change of status, at most once a minute for a repeating alert,
@@ -148,6 +155,9 @@ export function IncidentDetail(props: { id: string }) {
                       ? [{ label: "Escalate now", onSelect: () => run("escalate", () => api().escalate(props.id)) }]
                       : []),
                     { label: "Reassign", onSelect: () => reassigning.set(true) },
+                    ...(mayNotify() && (d().incident.severity === "critical" || d().incident.severity === "error")
+                      ? [{ label: "Notify customers", onSelect: () => noticing.set(true) }]
+                      : []),
                   ]}
                 />
               </View>
@@ -200,6 +210,7 @@ export function IncidentDetail(props: { id: string }) {
               />
               <Btn title="Add note" variant="secondary" busy={busy() === "note"} disabled={!!busy() || !note().trim()} onPress={addNote} />
             </View>
+            <CustomerNotice id={props.id} open={noticing()} onClose={() => noticing.set(false)} onSent={() => detail.refetch()} />
             <FormSheet open={reassigning()} onClose={() => reassigning.set(false)} title="Reassign">
               <If when={people()} else={people.error() ? <Failed error={people.error()} onRetry={() => people.refetch()} /> : <Loading />}>
                 {(list) => (

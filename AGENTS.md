@@ -14,6 +14,10 @@ Everything lives in the one `Pager` Durable Object. Anything that must happen la
 
 Secrets the pager generates for itself (action-link secret, VAPID keys) stay in the database. A deploy must never replace them: that would cut off every subscribed device.
 
+## Customer notices
+
+A notice is always sent by a person, carries only the words they wrote and the service name, and is a dry run unless `CUSTOMER_NOTIFY` is `on`. Never add alert titles or details to it, never send one automatically, and never turn it on in a deploy nobody asked for. See `docs/alarm-permissions.md`.
+
 ## UI
 
 Follow https://nsh.dev/zh-CN/docs/design-guides/. Colors come from `app/theme.json` (light and dark) by name, never hex in a screen; shared controls live in `app/src/ui.tsx`. Touch targets are at least 44 pt. State is never color alone. Commands are buttons or menus, not styled text.

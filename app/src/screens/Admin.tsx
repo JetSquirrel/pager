@@ -1,11 +1,11 @@
 // Admin: set up who gets paged for what — users, rotations, escalation policies and services
 // (with the URLs monitoring tools send alerts to).
 import { Clipboard, resource, signal, Text, View } from "nsh";
-import { Input } from "nsh/base";
-import type { Policy, PolicyTarget, ScheduleDef, Service, User } from "../api";
+import { Input, Switch } from "nsh/base";
+import type { Customer, CustomerChannel, Policy, PolicyTarget, ScheduleDef, Service, User } from "../api";
 import { api } from "../store";
 import { toast } from "../toast";
-import { ActionMenu, Badge, Btn, Callout, Chips, Empty, Failed, Field, field, FormSheet, isDesktop, Loading, MenuBtn, Meta, Page, Row, Section, Segmented, Surface, Value } from "../ui";
+import { ActionMenu, Badge, Btn, Callout, Chips, Empty, Failed, Field, field, FormSheet, IconBtn, isDesktop, Loading, MenuBtn, Meta, Page, Row, Section, Segmented, Surface, Value } from "../ui";
 
 interface Data {
   users: User[];
@@ -289,7 +289,20 @@ function People(props: { d: () => Data; reload: () => void }) {
                 <Name>{u.name}</Name>
                 <Meta>{u.email}</Meta>
               </View>
-              {u.role === "admin" && <Badge label="Admin" />}
+              <If when={u.role === "admin"} else={
+                <View class="flex-row items-center gap-2">
+                  <Meta>Customer notices</Meta>
+                  <Switch
+                    checked={!!u.can_notify_customers}
+                    accessibilityLabel={`${u.name} may notify customers`}
+                    onChange={(checked) => api().updateUser(u.id, { can_notify_customers: checked }).then(props.reload, fail)}
+                    trackClass="w-9 rounded-full bg-input p-0.5 transition-colors checked:bg-primary"
+                    thumbClass="size-4 rounded-full bg-card shadow-sm transition-transform checked:translate-x-4"
+                  />
+                </View>
+              }>
+                <Badge label="Admin" />
+              </If>
             </Row>
           ))}
         </Surface>
@@ -305,6 +318,78 @@ function People(props: { d: () => Data; reload: () => void }) {
           <Segmented options={[{ value: "responder", label: "Responder" }, { value: "admin", label: "Admin" }]} value={role()} onChange={(v) => role.set(v as "responder" | "admin")} />
         </Field>
         <Btn title="Add person" disabled={!email()} onPress={add} />
+      </FormSheet>
+    </Section>
+  );
+}
+
+// ------------------------------------------------------------------ customers
+
+const CHANNELS: { value: CustomerChannel; label: string; field: string; key: string }[] = [
+  { value: "webhook", label: "Webhook", field: "URL", key: "url" },
+  { value: "slack", label: "Slack", field: "Webhook URL", key: "webhook_url" },
+  { value: "ntfy", label: "ntfy", field: "Topic", key: "topic" },
+];
+
+function Customers(props: { d: () => Data }) {
+  const list = resource(async () => api().customers());
+  const open = signal(false);
+  const name = signal("");
+  const channel = signal<CustomerChannel>("webhook");
+  const target = signal("");
+  const service = signal<string | null>(null);
+  const meta = () => CHANNELS.find((c) => c.value === channel())!;
+  const add = async () => {
+    try {
+      await api().addCustomer({ name: name().trim(), type: channel(), config: { [meta().key]: target().trim() }, service_id: service() });
+      name.set("");
+      target.set("");
+      service.set(null);
+      open.set(false);
+      list.refetch();
+    } catch (e) {
+      fail(e);
+    }
+  };
+  const serviceName = (id: string | null) => (id ? (props.d().services.find((s) => s.id === id)?.name ?? "?") : "All services");
+  return (
+    <Section title="Customers" count={list()?.customers.length} right={<AddButton title="Add customer" onPress={() => open.set(true)} />}>
+      <If when={list()} else={list.error() ? <Failed error={list.error()} onRetry={() => list.refetch()} /> : <Loading />}>
+        {(l) => (
+          <View class="gap-2">
+            <If when={!l().live}>
+              <Callout title="Dry run: notices reach nobody until CUSTOMER_NOTIFY is on." />
+            </If>
+            <If when={l().customers.length > 0} else={<Surface><Empty title="No customers" hint="They hear from you only when someone sends a notice." /></Surface>}>
+              <Surface>
+                {l().customers.map((c: Customer) => (
+                  <Row>
+                    <View class="flex-1 gap-0.5">
+                      <Name>{c.name}</Name>
+                      <Meta>{`${c.type}  ${serviceName(c.service_id)}`}</Meta>
+                    </View>
+                    <IconBtn icon="trash" label={`Remove ${c.name}`} onPress={() => api().deleteCustomer(c.id).then(() => list.refetch(), fail)} />
+                  </Row>
+                ))}
+              </Surface>
+            </If>
+          </View>
+        )}
+      </If>
+      <FormSheet open={open()} onClose={() => open.set(false)} title="Add customer">
+        <Field label="Name">
+          <Input testID="customer-name" value={name()} onChange={(v) => name.set(v)} placeholder="Acme Inc" class={field} />
+        </Field>
+        <Field label="Channel">
+          <Segmented testID="customer-channel" options={CHANNELS} value={channel()} onChange={(v) => (channel.set(v), target.set(""))} />
+        </Field>
+        <Field label={meta().field}>
+          <Input testID="customer-target" value={target()} onChange={(v) => target.set(v)} autoCapitalize="none" autoCorrect={false} class={field} />
+        </Field>
+        <Field label="Service" hint="None selected means every service.">
+          <Chips testID="customer-service" options={props.d().services.map((s) => ({ id: s.id, label: s.name }))} selected={service() ? [service()!] : []} onToggle={(id) => service.update((v) => (v === id ? null : id))} />
+        </Field>
+        <Btn title="Add customer" disabled={!name().trim() || !target().trim()} onPress={add} />
       </FormSheet>
     </Section>
   );
@@ -334,13 +419,14 @@ function Usage(props: { usage: () => Awaited<ReturnType<ReturnType<typeof api>["
   );
 }
 
-type Tab = "services" | "policies" | "rotations" | "people" | "usage";
+type Tab = "services" | "policies" | "rotations" | "people" | "customers" | "usage";
 
 const TABS: { value: Tab; label: string }[] = [
   { value: "services", label: "Services" },
   { value: "policies", label: "Policies" },
   { value: "rotations", label: "Rotations" },
   { value: "people", label: "People" },
+  { value: "customers", label: "Customers" },
   { value: "usage", label: "Usage" },
 ];
 
@@ -365,6 +451,7 @@ export function Admin() {
               <If when={tab() === "policies"}><Policies d={d} reload={reload} /></If>
               <If when={tab() === "rotations"}><Schedules d={d} reload={reload} /></If>
               <If when={tab() === "people"}><People d={d} reload={reload} /></If>
+              <If when={tab() === "customers"}><Customers d={d} /></If>
               <If when={tab() === "usage"}>
                 <If when={usage()} else={<Loading />}>{(u) => <Usage usage={u} />}</If>
               </If>

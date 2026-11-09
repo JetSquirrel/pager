@@ -349,6 +349,66 @@ test("shows my own shifts first", async () => {
   await app.waitFor("id:on-call-now >> Primary");
 });
 
+test("runs a customer notice as a dry run, with confirmation", async () => {
+  const posts: unknown[] = [];
+  const app = await open("App.tsx", {
+    storage: signedIn,
+    network: api({
+      [`GET ${SERVER}/v1/incidents/inc_1`]: detailOf(),
+      [`GET ${SERVER}/v1/incidents/inc_1/customer-notices`]: { body: { audience: 3, live: false, allowed: true, notices: [] } },
+      [`POST ${SERVER}/v1/incidents/inc_1/customer-notices`]: (req: { body: string }) => {
+        posts.push(JSON.parse(req.body));
+        return { status: 201, body: { id: "ntc_1", audience: 3, dry_run: true } };
+      },
+    }),
+  });
+  await app.press("Disk 95% on db1");
+  await app.waitFor("id:paged >> Alice");
+  await app.press("id:incident-more");
+  await app.press("Notify customers");
+  await app.waitFor("Dry run for 3 customers");
+  await app.type("id:notice-message", "We are looking into it.");
+  app.onDialog(() => "Dry run");
+  await app.press("Dry run for 3 customers");
+  await app.waitFor("Dry run: 3 customers would be told");
+  expect(app.dialogs()[0].title).toBe("Run a dry run?");
+  expect(posts).toEqual([{ message: "We are looking into it." }]);
+});
+
+test("hides customer notices from someone without the permission", async () => {
+  const app = await open("App.tsx", {
+    storage: signedIn,
+    network: api({
+      [`GET ${SERVER}/v1/me`]: { body: { user: { ...user, role: "responder", can_notify_customers: 0 } } },
+      [`GET ${SERVER}/v1/incidents/inc_1`]: detailOf(),
+    }),
+  });
+  await app.press("Disk 95% on db1");
+  await app.waitFor("id:paged >> Alice");
+  await app.press("id:incident-more");
+  await app.waitFor("Reassign");
+  expect(app.shows("Notify customers")).toBe(false);
+});
+
+test("the alarm check says what would stop a page", async () => {
+  const app = await open("App.tsx", {
+    storage: signedIn,
+    network: api({
+      [`GET ${SERVER}/v1/contact-methods`]: {
+        body: {
+          contact_methods: [{ id: "cm_1", type: "webhook", label: "Ops hook", config: { url: "https://x.test" }, min_severity: "info", enabled: true, delay_min: 0, last_error: "HTTP 500" }],
+          tuya_presets: ["siren"],
+        },
+      },
+    }),
+    host: { handlers: { pushState: () => ({ supported: true, ios: false, standalone: false, endpoint: null, permission: "denied" }) } },
+  });
+  await app.press("Settings");
+  await app.waitFor("id:alarm-reach >> Critical pages ring 1 method");
+  await app.waitFor("id:alarm-failing >> Ops hook: last delivery failed");
+  await app.waitFor("id:alarm-browser >> This browser blocks alarms: allow notifications for this site");
+});
+
 test("takes over a shift from the menu", async () => {
   const posts: unknown[] = [];
   const app = await open("App.tsx", {

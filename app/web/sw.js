@@ -24,9 +24,10 @@ function show(p) {
     body: p.body || "",
     tag: p.tag || undefined,
     renotify: paging && !!p.tag,
-    requireInteraction: paging && p.severity === "critical",
+    // An urgent page stays on screen until someone answers it.
+    requireInteraction: paging && (p.severity === "critical" || p.severity === "error"),
     silent: !paging,
-    vibrate: paging ? [400, 200, 400, 200, 400] : undefined,
+    vibrate: !paging ? undefined : p.severity === "critical" ? [800, 200, 800, 200, 800, 200, 800] : [400, 200, 400, 200, 400],
     data: { url: p.url || self.registration.scope, ack_url: p.ack_url, resolve_url: p.resolve_url },
     actions,
   });

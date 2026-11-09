@@ -4,7 +4,7 @@ import type { ContactMethod, Severity } from "../api";
 import { pushEnable, pushState } from "../host";
 import { api, me, session, signOut } from "../store";
 import { toast } from "../toast";
-import { ActionMenu, Badge, Btn, Callout, Chips, Failed, Field, field, FormSheet, Icon, IconBtn, type IconName, isDesktop, Loading, MenuBtn, Meta, Page, Row, Section, Segmented, SEV_LABEL, Surface } from "../ui";
+import { ActionMenu, Badge, Btn, Callout, Chips, Dot, Failed, Field, field, FormSheet, Icon, IconBtn, type IconName, isDesktop, Loading, MenuBtn, Meta, Page, Row, Section, Segmented, SEV_LABEL, Surface } from "../ui";
 
 type Kind = ContactMethod["type"];
 
@@ -69,6 +69,9 @@ function MethodRow(props: { cm: () => ContactMethod; reload: () => void }) {
           <View class="flex-1">
             <Text class="text-sm font-medium text-card-foreground" numberOfLines={1}>{name()}</Text>
             <Text class="text-xs text-muted-foreground" numberOfLines={1}>{describe(cm())}</Text>
+            <If when={cm().last_error}>
+              <Text class="text-xs text-destructive" numberOfLines={2}>{cm().last_error}</Text>
+            </If>
           </View>
           <Switch
             checked={cm().enabled}
@@ -198,6 +201,51 @@ function ThisDevice(props: { methods: ContactMethod[]; onAdded: () => void }) {
   );
 }
 
+/** Would a critical page get through right now? Everything here is something the person can fix. */
+function AlarmCheck(props: { methods: ContactMethod[] }) {
+  const browser = resource(pushState);
+  const live = () => props.methods.filter((m) => m.enabled);
+  const failing = () => live().filter((m) => m.last_error);
+  const count = () => `${live().length} ${live().length === 1 ? "method" : "methods"}`;
+  const permission = () => browser()?.permission;
+  return (
+    <Section title="Alarm check">
+      <Surface>
+        <Row testID="alarm-reach">
+          <Dot tone={live().length ? "ok" : "critical"} />
+          <Text class="flex-1 text-sm text-card-foreground">{live().length ? `Critical pages ring ${count()}` : "Critical pages reach nothing while the app is closed"}</Text>
+        </Row>
+        {failing().map((m) => (
+          <Row testID="alarm-failing">
+            <Dot tone="critical" />
+            <Text class="flex-1 text-sm text-card-foreground">{`${m.label || m.type}: last delivery failed`}</Text>
+          </Row>
+        ))}
+        <If when={permission() && permission() !== "unsupported"}>
+          <Row testID="alarm-browser">
+            <Dot tone={permission() === "granted" ? "ok" : permission() === "denied" ? "critical" : "warning"} />
+            <Text class="flex-1 text-sm text-card-foreground">
+              {permission() === "granted" ? "This browser may show alarms" : permission() === "denied" ? "This browser blocks alarms: allow notifications for this site" : "This browser has not been asked yet"}
+            </Text>
+          </Row>
+        </If>
+        <If when={browser()?.ios && !browser()?.standalone}>
+          <Row>
+            <Dot tone="warning" />
+            <Text class="flex-1 text-sm text-card-foreground">On iPhone, alarms need Pager on the Home Screen</Text>
+          </Row>
+        </If>
+        <If when={props.methods.some((m) => m.type === "ntfy" && m.enabled)}>
+          <Row>
+            <Dot tone="neutral" />
+            <Text class="flex-1 text-sm text-card-foreground">In the ntfy app, turn on Instant delivery and Override Do Not Disturb for this topic</Text>
+          </Row>
+        </If>
+      </Surface>
+    </Section>
+  );
+}
+
 export function Settings() {
   const methods = resource(async () => api().contactMethods());
   const adding = signal(false);
@@ -221,11 +269,13 @@ export function Settings() {
         </Surface>
       </Section>
 
+      <If when={methods()}>{(m) => <AlarmCheck methods={m().contact_methods} />}</If>
+
       <Section title="How you get paged" right={<Btn title="Add" variant="ghost" icon="plus" onPress={() => adding.set(true)} />}>
         <If when={methods()} else={methods.error() ? <Failed error={methods.error()} onRetry={() => methods.refetch()} /> : <Loading />}>
           {(m) => (
             <View class="gap-2">
-              <If when={m().contact_methods.length > 0} else={<Callout tone="critical" title="You only see pages while this app is open." />}>
+              <If when={m().contact_methods.length > 0}>
                 <Surface>
                   <Each of={m().contact_methods} key={(c: ContactMethod) => c.id}>
                     {(c) => <MethodRow cm={c} reload={() => methods.refetch()} />}

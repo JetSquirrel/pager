@@ -15,7 +15,7 @@ const DAY = 86_400_000;
 /** "GET /v1/incidents/:id": the route without ids, so a day's breakdown stays a few dozen keys. */
 export const routeKey = (req: Request) => {
   const path = new URL(req.url).pathname
-    .replace(/\/(inc|usr|sch|pol|svc|cm|dev|ovr)_[\w-]+/g, "/:id")
+    .replace(/\/(inc|usr|sch|pol|svc|cm|dev|ovr|cst)_[\w-]+/g, "/:id")
     .replace(/^(\/v1\/integrations|\/v1\/actions)\/[^/]+/, "$1/:key");
   return `${req.method} ${path.slice(0, 48)}`;
 };

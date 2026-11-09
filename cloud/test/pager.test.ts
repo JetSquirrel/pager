@@ -207,6 +207,142 @@ describe("responding from a phone", () => {
   });
 });
 
+describe("reaching people in an emergency", () => {
+  const nobody = async () => {
+    const seeded = await seed(h);
+    return { ...seeded, r: await fire(seeded.key) };
+  };
+
+  it("moves on within a minute when nothing can reach the person paged", async () => {
+    const { T, B, r } = await nobody();
+    await addHook(B, "https://bob.test/");
+    await advance(30_000);
+    expect(sent.map((s) => s.url)).toEqual(["https://bob.test/"]);
+    expect((await h.call("GET", `/v1/incidents/${r.incident_id}`, { token: T })).json.escalation.step).toBe(1);
+  });
+
+  it("does not count someone with a hardware pager as unreachable", async () => {
+    const { T, key } = await seed(h);
+    await h.call("POST", "/v1/devices", { token: T, body: { name: "Desk" } });
+    const r = await fire(key);
+    const detail = (await h.call("GET", `/v1/incidents/${r.incident_id}`, { token: T })).json;
+    expect(detail.escalation.nextAt).toBe(Date.now() + 5 * MIN);
+    expect(detail.events.map((e: any) => e.kind)).not.toContain("notify_failed");
+  });
+
+  it("remembers a method's last failure until it works again", async () => {
+    const { T, key } = await seed(h);
+    await addHook(T, "https://flaky.test/");
+    failing.add("https://flaky.test/");
+    await fire(key);
+    await h.alarms();
+    const method = async () => (await h.call("GET", "/v1/contact-methods", { token: T })).json.contact_methods[0];
+    expect((await method()).last_error).toContain("connection refused");
+    failing.clear();
+    await advance(5_000);
+    expect((await method()).last_error).toBeNull();
+  });
+});
+
+describe("customer notices", () => {
+  const live = () => (h = makeHarness({ CUSTOMER_NOTIFY: "on" }));
+  const customer = (T: string, url = "https://acme.test/") => h.call("POST", "/v1/customers", { token: T, body: { name: "Acme", type: "webhook", config: { url } } });
+  const notify = (token: string, id: string, message = "Checkout is degraded, we are on it.") => h.call("POST", `/v1/incidents/${id}/customer-notices`, { token, body: { message } });
+
+  it("is a dry run until it is switched on: nobody is contacted", async () => {
+    const { T, key } = await seed(h);
+    await customer(T);
+    const r = await fire(key);
+    const res = await notify(T, r.incident_id);
+    expect(res.status).toBe(201);
+    expect(res.json).toMatchObject({ audience: 1, dry_run: true });
+    await h.alarms();
+    expect(sent.filter((s) => s.url === "https://acme.test/")).toEqual([]);
+    expect(await timeline(T, r.incident_id)).toContain("customer_notice_dry_run");
+  });
+
+  it("sends only what the sender wrote: no title, details or links", async () => {
+    live();
+    const { T, key } = await seed(h);
+    await customer(T);
+    const r = await fire(key);
+    await notify(T, r.incident_id);
+    await h.alarms();
+    const got = sent.filter((s) => s.url === "https://acme.test/");
+    expect(got.map((s) => s.body)).toEqual([{ event: "customer_notice", notice_id: expect.any(String), service: "API", message: "Checkout is degraded, we are on it." }]);
+    expect(await timeline(T, r.incident_id)).toContain("customer_notice");
+  });
+
+  it("needs the permission, which an admin can grant", async () => {
+    const { T, B, bobId, key } = await seed(h);
+    await customer(T);
+    const r = await fire(key);
+    expect((await notify(B, r.incident_id)).status).toBe(403);
+    await h.call("PATCH", `/v1/users/${bobId}`, { token: T, body: { can_notify_customers: true } });
+    expect((await notify(B, r.incident_id)).status).toBe(201);
+    expect((await h.call("PATCH", `/v1/users/${bobId}`, { token: B, body: { can_notify_customers: false } })).status).toBe(403);
+  });
+
+  it("is only for open critical or error incidents", async () => {
+    const { T, key } = await seed(h);
+    await customer(T);
+    const warn = await h.call("POST", `/v1/integrations/${key}/events`, { body: { event_action: "trigger", dedup_key: "w", payload: { summary: "Slow", severity: "warning", source: "x" } } });
+    expect((await notify(T, warn.json.results[0].incident_id)).status).toBe(409);
+    const r = await fire(key);
+    await h.call("POST", `/v1/incidents/${r.incident_id}/resolve`, { token: T });
+    expect((await notify(T, r.incident_id)).status).toBe(409);
+  });
+
+  it("refuses to send twice within five minutes", async () => {
+    live();
+    const { T, key } = await seed(h);
+    await customer(T);
+    const r = await fire(key);
+    expect((await notify(T, r.incident_id)).status).toBe(201);
+    expect((await notify(T, r.incident_id)).status).toBe(429);
+    vi.setSystemTime(Date.now() + 5 * MIN);
+    expect((await notify(T, r.incident_id)).status).toBe(201);
+  });
+
+  it("retries a customer that failed and records giving up", async () => {
+    live();
+    const { T, key } = await seed(h);
+    await customer(T, "https://down.test/");
+    failing.add("https://down.test/");
+    const r = await fire(key);
+    await notify(T, r.incident_id);
+    await h.alarms();
+    for (const wait of [5, 10, 20, 40, 60]) await advance(wait * 1000);
+    expect(await timeline(T, r.incident_id)).toContain("customer_notice_failed");
+  });
+
+  it("only admins see or change the customer list, and secrets stay hidden", async () => {
+    const { T, B } = await seed(h);
+    await h.call("POST", "/v1/customers", { token: T, body: { name: "Acme", type: "webhook", config: { url: "https://a.test/", authorization: "Bearer s3cret" } } });
+    expect((await h.call("GET", "/v1/customers", { token: B })).status).toBe(403);
+    expect((await h.call("POST", "/v1/customers", { token: B, body: {} })).status).toBe(403);
+    const { json } = await h.call("GET", "/v1/customers", { token: T });
+    expect(json.customers[0].config.authorization).toBe("••••");
+    expect(json.live).toBe(false);
+  });
+});
+
+describe("getting back in", () => {
+  it("issues a new admin token with the bootstrap token, and retires the old one", async () => {
+    const { T } = await seed(h);
+    expect((await h.call("POST", "/v1/recover", { token: "wrong", body: { email: "a@x.test" } })).status).toBe(401);
+    expect((await h.call("POST", "/v1/recover", { token: "boot", body: { email: "b@x.test" } })).status).toBe(404);
+    const { json } = await h.call("POST", "/v1/recover", { token: "boot", body: { email: "a@x.test" } });
+    expect((await h.call("GET", "/v1/me", { token: json.token })).status).toBe(200);
+    expect((await h.call("GET", "/v1/me", { token: T })).status).toBe(401);
+  });
+
+  it("keeps at least one admin", async () => {
+    const { T, aliceId } = await seed(h);
+    expect((await h.call("PATCH", `/v1/users/${aliceId}`, { token: T, body: { role: "responder" } })).status).toBe(409);
+  });
+});
+
 describe("delivery", () => {
   it("retries only the channel that failed, and gives up out loud", async () => {
     const { T, key } = await seed(h);

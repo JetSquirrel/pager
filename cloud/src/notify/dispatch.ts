@@ -2,6 +2,7 @@
 // A row is one contact method, so a siren that failed is retried without paging the phone that already rang.
 import type { Db } from "../db";
 import { addEvent, getIncident } from "../incidents";
+import { deliverNotice } from "./customers";
 import type { Env, Incident, NotifyEvent } from "../types";
 import { now, parseJson, severityRank } from "../util";
 import { sendNtfy, sendSlack, sendWebhook, type NtfyConfig, type SlackConfig, type WebhookConfig } from "./channels";
@@ -17,19 +18,21 @@ export interface ContactMethodRow {
   min_severity: string;
   enabled: number;
   delay_min: number;
+  last_error: string | null;
 }
 
-interface OutboxRow {
+export interface OutboxRow {
   id: number;
   incident_id: string;
   user_id: string;
   contact_method_id: string;
-  event: NotifyEvent;
+  /** "customer": user_id holds the notice and contact_method_id the customer (src/notify/customers.ts). */
+  event: NotifyEvent | "customer";
   attempts: number;
 }
 
 /** Seconds to wait after the nth failure; after the last one the page is given up on. */
-const BACKOFF_S = [5, 10, 20, 40, 60];
+export const BACKOFF_S = [5, 10, 20, 40, 60];
 /** Free-plan Workers may make 50 subrequests per invocation, and a Tuya page can take three. The next pass starts at once. */
 const BATCH = 12;
 const TEST_CLEAR_AFTER_MS = 15_000;
@@ -62,20 +65,30 @@ export function wants(cm: Pick<ContactMethodRow, "enabled" | "min_severity">, in
 const insertRow = (env: Env, incidentId: string, userId: string, cmId: string, event: NotifyEvent, dueAt: number) =>
   env.DB.prepare(`INSERT INTO outbox (incident_id, user_id, contact_method_id, event, due_at) VALUES (?, ?, ?, ?, ?)`).bind(incidentId, userId, cmId, event, dueAt);
 
-/** Queues `event` to every contact method of these users. A paged user nothing can reach is written on the timeline. */
-export async function enqueue(env: Env, incident: Incident, userIds: string[], event: NotifyEvent): Promise<void> {
-  if (userIds.length === 0) return;
+/**
+ * Queues `event` to every contact method of these users. A paged user nothing can reach is written on the timeline.
+ * Returns how many of them something can reach: a hardware pager counts, it asks for its state on its own.
+ */
+export async function enqueue(env: Env, incident: Incident, userIds: string[], event: NotifyEvent): Promise<number> {
+  if (userIds.length === 0) return 0;
   const { results } = await env.DB.prepare(`SELECT * FROM contact_methods WHERE user_id IN (${userIds.map(() => "?").join(",")})`)
     .bind(...userIds)
     .all<ContactMethodRow>();
   const methods = results.filter((cm) => wants(cm, incident, event));
   const t = now();
-  const unreachable = event === "trigger" ? userIds.filter((u) => !methods.some((m) => m.user_id === u)) : [];
+  let unreachable = event === "trigger" ? userIds.filter((u) => !methods.some((m) => m.user_id === u)) : [];
+  if (unreachable.length) {
+    const { results: boards } = await env.DB.prepare(`SELECT DISTINCT user_id FROM devices WHERE user_id IN (${unreachable.map(() => "?").join(",")})`)
+      .bind(...unreachable)
+      .all<{ user_id: string }>();
+    unreachable = unreachable.filter((u) => !boards.some((b) => b.user_id === u));
+  }
   await env.DB.batch([
     ...methods.map((cm) => insertRow(env, incident.id, cm.user_id, cm.id, event, event === "trigger" ? t + cm.delay_min * 60_000 : t)),
     ...unreachable.map((u) => addEvent(env, incident.id, "notify_failed", { actor: u, message: "No contact method reaches this person for this severity", at: t })),
   ]);
   env.wake();
+  return userIds.length - unreachable.length;
 }
 
 /** A test page now, and the all-clear that silences a siren a little later. */
@@ -99,6 +112,7 @@ export async function drainOutbox(env: Env, at: number): Promise<void> {
 const done = (env: Env, id: number) => env.DB.prepare(`DELETE FROM outbox WHERE id = ?`).bind(id).run();
 
 async function deliverRow(env: Env, row: OutboxRow): Promise<void> {
+  if (row.event === "customer") return deliverNotice(env, row);
   const isTest = row.incident_id.startsWith("test_");
   const incident = isTest ? testIncident(row.incident_id) : await getIncident(env, row.incident_id);
   // A page that comes due after the incident was acknowledged must not ring the siren again.
@@ -110,7 +124,7 @@ async function deliverRow(env: Env, row: OutboxRow): Promise<void> {
 
   const name = `${cm.type}${cm.label ? ` (${cm.label})` : ""}`;
   try {
-    await deliver(env, cm, incident, row.event);
+    await deliver(env, cm, incident, row.event as NotifyEvent);
   } catch (e) {
     if (e instanceof SubscriptionGone) {
       await env.DB.batch([env.DB.prepare(`DELETE FROM contact_methods WHERE id = ?`).bind(cm.id), env.DB.prepare(`DELETE FROM outbox WHERE contact_method_id = ?`).bind(cm.id)]);
@@ -120,6 +134,7 @@ async function deliverRow(env: Env, row: OutboxRow): Promise<void> {
     console.error("delivery failed", row, e);
     const backoff = BACKOFF_S[row.attempts];
     const message = `${name}: ${e}`.slice(0, 1000);
+    if (row.attempts === 0) await env.DB.prepare(`UPDATE contact_methods SET last_error = ?, last_error_at = ? WHERE id = ?`).bind(String(e).slice(0, 300), now(), cm.id).run();
     if (backoff === undefined) {
       await done(env, row.id);
       if (!isTest) await addEvent(env, incident.id, "notify_gave_up", { actor: cm.user_id, message, data: { event: row.event } }).run();
@@ -131,6 +146,8 @@ async function deliverRow(env: Env, row: OutboxRow): Promise<void> {
     return;
   }
   await done(env, row.id);
+  // Written only when it tells the alarm check something new: a delivery is otherwise one row and not two.
+  if (cm.last_error !== null || isTest) await env.DB.prepare(`UPDATE contact_methods SET last_error = NULL, last_error_at = NULL, last_ok_at = ? WHERE id = ?`).bind(now(), cm.id).run();
   if (!isTest && env.pressure() !== "shed") {
     await addEvent(env, incident.id, "notify_sent", { actor: cm.user_id, message: `${row.event}: ${name}`, data: { event: row.event } }).run();
   }
