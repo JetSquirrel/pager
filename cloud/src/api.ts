@@ -4,7 +4,7 @@ import { verifyActionToken } from "./actions";
 import { deviceApi, devicesAdmin } from "./devices";
 import { requireAdmin, requireUser, type AppEnv } from "./auth";
 import { FREE, TARGET, pressure } from "./budget";
-import { escalationStatus, planStep, repage, resolveTargets } from "./escalation";
+import { escalateNow, escalationStatus, planStep, repage, resolveTargets } from "./escalation";
 import {
   acknowledge,
   addNote,
@@ -12,7 +12,9 @@ import {
   listEvents,
   listIncidents,
   processAlert,
+  reassign,
   resolve,
+  snooze,
 } from "./incidents";
 import { parseAlertmanager, parseGeneric } from "./ingest";
 import { enqueueTest } from "./notify/dispatch";
@@ -209,6 +211,47 @@ api.post("/incidents/:id/repage", async (c) => {
   await repage(c.env, incident.id);
   c.env.wake();
   return c.json({ ok: true });
+});
+
+/** Silence an open incident for a while; the policy starts over when the time is up. */
+api.post("/incidents/:id/snooze", async (c) => {
+  const incident = await incidentOr404(c);
+  if (incident.status === "resolved") throw new HttpError(409, "this incident is resolved");
+  const { minutes } = await body<{ minutes: number }>(c);
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) throw new HttpError(400, "minutes must be a whole number from 1 to 1440");
+  return c.json({ incident: await snooze(c.env, c.executionCtx, incident, c.get("user").id, minutes) });
+});
+
+/** Hand an open incident to one person, who is paged at once. */
+api.post("/incidents/:id/reassign", async (c) => {
+  const incident = await incidentOr404(c);
+  if (incident.status === "resolved") throw new HttpError(409, "this incident is resolved");
+  const { user_id } = await body<{ user_id: string }>(c);
+  const user = await c.env.DB.prepare(`SELECT id, name FROM users WHERE id = ?`).bind(need(user_id, "user_id")).first<{ id: string; name: string }>();
+  if (!user) throw new HttpError(404, "user not found");
+  return c.json({ incident: await reassign(c.env, c.executionCtx, incident, c.get("user").id, user) });
+});
+
+/** Go to the next escalation step now. */
+api.post("/incidents/:id/escalate", async (c) => {
+  const incident = await incidentOr404(c);
+  if (incident.status !== "triggered") throw new HttpError(409, "only triggered incidents can be escalated");
+  if (!(await escalateNow(c.env, incident.id))) throw new HttpError(409, "this is the last escalation step");
+  c.env.wake();
+  return c.json({ incident: await getIncident(c.env, incident.id) });
+});
+
+/** Acknowledge or resolve several incidents in one request. */
+api.post("/incidents/bulk", async (c) => {
+  const { action, ids } = await body<{ action: string; ids: string[] }>(c);
+  if (action !== "acknowledge" && action !== "resolve") throw new HttpError(400, "action must be acknowledge or resolve");
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > 50) throw new HttpError(400, "ids must list 1 to 50 incidents");
+  const out = [];
+  for (const id of ids) {
+    const incident = await getIncident(c.env, String(id));
+    if (incident) out.push(await (action === "acknowledge" ? acknowledge : resolve)(c.env, c.executionCtx, incident, c.get("user").id));
+  }
+  return c.json({ incidents: out });
 });
 
 /** Manually open an incident on a service (e.g. a customer report). */
@@ -411,6 +454,11 @@ api.delete("/schedules/:id/overrides/:oid", async (c) => {
 
 const CM_TYPES = ["tuya", "ntfy", "webhook", "slack", "webpush"];
 
+function delayMin(v: unknown): number {
+  if (!Number.isInteger(v) || (v as number) < 0 || (v as number) > 60) throw new HttpError(400, "delay_min must be a whole number from 0 to 60");
+  return v as number;
+}
+
 function validateConfig(type: string, cfg: any): Record<string, unknown> {
   if (!cfg || typeof cfg !== "object") throw new HttpError(400, "config is required");
   switch (type) {
@@ -449,7 +497,7 @@ api.get("/contact-methods", async (c) => {
 });
 
 api.post("/contact-methods", async (c) => {
-  const b = await body<{ type: string; label?: string; config: unknown; min_severity?: string }>(c);
+  const b = await body<{ type: string; label?: string; config: unknown; min_severity?: string; delay_min?: number }>(c);
   const config = validateConfig(b.type, b.config);
   const sev = SEVERITIES.includes(b.min_severity as any) ? b.min_severity : "info";
   const id = newId("cm");
@@ -459,14 +507,14 @@ api.post("/contact-methods", async (c) => {
       .bind(c.get("user").id, (config as { endpoint: string }).endpoint)
       .run();
   }
-  await c.env.DB.prepare(`INSERT INTO contact_methods (id, user_id, type, label, config, min_severity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .bind(id, c.get("user").id, b.type, b.label ?? "", JSON.stringify(config), sev, now())
+  await c.env.DB.prepare(`INSERT INTO contact_methods (id, user_id, type, label, config, min_severity, delay_min, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(id, c.get("user").id, b.type, b.label ?? "", JSON.stringify(config), sev, delayMin(b.delay_min ?? 0), now())
     .run();
   return c.json({ id }, 201);
 });
 
 api.patch("/contact-methods/:id", async (c) => {
-  const b = await body<{ label?: string; enabled?: boolean; min_severity?: string }>(c);
+  const b = await body<{ label?: string; enabled?: boolean; min_severity?: string; delay_min?: number }>(c);
   const sets: string[] = [];
   const vals: unknown[] = [];
   if (b.label !== undefined) (sets.push("label = ?"), vals.push(b.label));
@@ -475,6 +523,7 @@ api.patch("/contact-methods/:id", async (c) => {
     if (!SEVERITIES.includes(b.min_severity as any)) throw new HttpError(400, "bad min_severity");
     sets.push("min_severity = ?"), vals.push(b.min_severity);
   }
+  if (b.delay_min !== undefined) (sets.push("delay_min = ?"), vals.push(delayMin(b.delay_min)));
   if (sets.length === 0) throw new HttpError(400, "nothing to change");
   await c.env.DB.prepare(`UPDATE contact_methods SET ${sets.join(", ")} WHERE id = ? AND user_id = ?`)
     .bind(...vals, c.req.param("id"), c.get("user").id)

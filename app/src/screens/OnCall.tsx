@@ -2,7 +2,7 @@ import { resource, Text, View } from "nsh";
 import type { OnCall as OnCallData, Shift } from "../api";
 import { api, me } from "../store";
 import { toast } from "../toast";
-import { ActionMenu, Badge, clock, Empty, Failed, Loading, MenuBtn, Meta, Page, Row, Surface, until } from "../ui";
+import { ActionMenu, Badge, clock, Empty, Failed, Loading, MenuBtn, Meta, Page, Row, Section, Surface, until } from "../ui";
 
 type Sched = OnCallData["schedules"][number];
 
@@ -63,6 +63,39 @@ function Schedule(props: { schedule: () => Sched; reload: () => void }) {
   );
 }
 
+/** The one question an on-call person opens this for: am I on, and when am I next? */
+function MyShifts(props: { schedules: () => Sched[] }) {
+  const now = () => props.schedules().filter((s) => s.current?.user_id === me()?.id);
+  const next = () =>
+    props
+      .schedules()
+      .flatMap((s) => s.next.filter((n) => n.user_id === me()?.id).map((n) => ({ name: s.name, starts_at: n.starts_at })))
+      .sort((a, b) => a.starts_at - b.starts_at)
+      .slice(0, 3);
+  return (
+    <Section title="Your shifts">
+      <Surface>
+        {now().map((s) => (
+          <Row testID="on-call-now">
+            <Badge label="On call" tone="ok" />
+            <Text class="flex-1 text-sm font-medium text-card-foreground" numberOfLines={1}>{s.name}</Text>
+            <Meta>Ends in {until(s.current!.ends_at)}</Meta>
+          </Row>
+        ))}
+        {next().map((n) => (
+          <Row>
+            <Text class="flex-1 text-sm text-card-foreground" numberOfLines={1}>{n.name}</Text>
+            <Meta>{clock(n.starts_at)}</Meta>
+          </Row>
+        ))}
+        <If when={now().length + next().length === 0}>
+          <Row><Meta>No shifts in the next two weeks</Meta></Row>
+        </If>
+      </Surface>
+    </Section>
+  );
+}
+
 export function OnCall() {
   const data = resource(async () => api().oncall());
   return (
@@ -74,6 +107,7 @@ export function OnCall() {
             else={<Empty icon="calendar" title="No rotations" hint={me()?.role === "admin" ? "Create one in Admin." : "An admin can create one."} />}
           >
             <View class="gap-3">
+              <MyShifts schedules={() => d().schedules} />
               <Each of={d().schedules} key={(s: Sched) => s.id}>
                 {(s) => <Schedule schedule={s} reload={() => data.refetch()} />}
               </Each>

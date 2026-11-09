@@ -1,4 +1,4 @@
-import { startEscalation, stopEscalation } from "./escalation";
+import { rearm, startEscalation, stopEscalation } from "./escalation";
 import { enqueue } from "./notify/dispatch";
 import type { AlertEvent, Env, Incident, IncidentStatus, NotifyEvent } from "./types";
 import { newId, now, parseJson } from "./util";
@@ -163,6 +163,42 @@ export async function resolve(
   await stopEscalation(env, incident.id);
   const updated = (await getIncident(env, incident.id))!;
   await notifyUsers(env, updated, updated.assignees, "resolve");
+  env.wake();
+  ctx.waitUntil(broadcast(env, "incident.updated", updated));
+  return updated;
+}
+
+/** Silences an open incident for a while: its pages stop, and the policy starts over when the time is up. */
+export async function snooze(env: Env, ctx: WaitUntil, incident: Incident, actor: string, minutes: number): Promise<Incident> {
+  const t = now();
+  const until = t + minutes * 60_000;
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE incidents SET status = 'acknowledged', acknowledged_at = COALESCE(acknowledged_at, ?), acknowledged_by = COALESCE(acknowledged_by, ?), snoozed_until = ?, updated_at = ? WHERE id = ?`,
+    ).bind(t, actor, until, t, incident.id),
+    env.DB.prepare(`UPDATE escalations SET stopped = 0, step = -1, next_at = ? WHERE incident_id = ?`).bind(until, incident.id),
+    addEvent(env, incident.id, "snoozed", { actor, message: `For ${minutes} min`, at: t, data: { until } }),
+  ]);
+  const updated = (await getIncident(env, incident.id))!;
+  if (incident.status === "triggered") await notifyUsers(env, updated, updated.assignees, "acknowledge");
+  env.wake();
+  ctx.waitUntil(broadcast(env, "incident.updated", updated));
+  return updated;
+}
+
+/** Hands an open incident to one person: it pages them now, and the people it left stop ringing. */
+export async function reassign(env: Env, ctx: WaitUntil, incident: Incident, actor: string, user: { id: string; name: string }): Promise<Incident> {
+  const t = now();
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE incidents SET status = 'triggered', assignees = ?, acknowledged_at = NULL, acknowledged_by = NULL, snoozed_until = NULL, updated_at = ? WHERE id = ?`,
+    ).bind(JSON.stringify([user.id]), t, incident.id),
+    addEvent(env, incident.id, "reassigned", { actor, message: `To ${user.name}`, at: t, data: { user: user.id } }),
+  ]);
+  await rearm(env, incident.id);
+  const updated = (await getIncident(env, incident.id))!;
+  await notifyUsers(env, updated, incident.assignees.filter((u) => u !== user.id), "reassign");
+  await notifyUsers(env, updated, [user.id], "trigger");
   env.wake();
   ctx.waitUntil(broadcast(env, "incident.updated", updated));
   return updated;

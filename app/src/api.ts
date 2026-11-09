@@ -28,6 +28,7 @@ export interface Incident {
   acknowledged_at: number | null;
   acknowledged_by: string | null;
   resolved_at: number | null;
+  snoozed_until: number | null;
 }
 
 export interface IncidentEvent {
@@ -66,6 +67,7 @@ export interface ContactMethod {
   config: Record<string, unknown>;
   min_severity: Severity;
   enabled: boolean;
+  delay_min: number;
 }
 
 export interface Service {
@@ -145,6 +147,11 @@ export class Api {
   incident = (id: string) => this.call<IncidentDetail>("GET", `/incidents/${id}`);
   acknowledge = (id: string) => this.call<{ incident: Incident }>("POST", `/incidents/${id}/acknowledge`);
   resolve = (id: string) => this.call<{ incident: Incident }>("POST", `/incidents/${id}/resolve`);
+  snooze = (id: string, minutes: number) => this.call<{ incident: Incident }>("POST", `/incidents/${id}/snooze`, { minutes });
+  reassign = (id: string, userId: string) => this.call<{ incident: Incident }>("POST", `/incidents/${id}/reassign`, { user_id: userId });
+  escalate = (id: string) => this.call<{ incident: Incident }>("POST", `/incidents/${id}/escalate`);
+  bulk = (action: "acknowledge" | "resolve", ids: string[]) => this.call<{ incidents: Incident[] }>("POST", "/incidents/bulk", { action, ids });
+  openIncident = (i: { service_id: string; title: string; severity: Severity }) => this.call<{ incident: Incident }>("POST", "/incidents", i);
   repage = (id: string) => this.call<{ ok: true }>("POST", `/incidents/${id}/repage`);
   note = (id: string, message: string) => this.call<{ ok: true }>("POST", `/incidents/${id}/notes`, { message });
   oncall = () => this.call<OnCall>("GET", "/oncall");
@@ -153,7 +160,7 @@ export class Api {
   contactMethods = () => this.call<{ contact_methods: ContactMethod[]; tuya_presets: string[] }>("GET", "/contact-methods");
   addContactMethod = (cm: { type: string; label: string; config: Record<string, unknown>; min_severity?: Severity }) =>
     this.call<{ id: string }>("POST", "/contact-methods", cm);
-  updateContactMethod = (id: string, patch: { enabled?: boolean; min_severity?: Severity; label?: string }) =>
+  updateContactMethod = (id: string, patch: { enabled?: boolean; min_severity?: Severity; label?: string; delay_min?: number }) =>
     this.call<{ ok: true }>("PATCH", `/contact-methods/${id}`, patch);
   deleteContactMethod = (id: string) => this.call<void>("DELETE", `/contact-methods/${id}`);
   testContactMethod = (id: string) => this.call<{ ok: true }>("POST", `/contact-methods/${id}/test`);

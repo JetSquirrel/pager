@@ -1,9 +1,9 @@
 import { effect, resource, Scroll, signal, Text, View } from "nsh";
 import { Input } from "nsh/base";
-import type { IncidentDetail as Detail, IncidentEvent } from "../api";
+import type { IncidentDetail as Detail, IncidentEvent, User } from "../api";
 import { api, incidents, upsert } from "../store";
 import { toast } from "../toast";
-import { Badge, Btn, clock, Dot, Fact, Failed, field, isDesktop, Loading, Meta, Section, SEV_LABEL, StatusBadge, Surface, timeAgo, type Tone, until, Value } from "../ui";
+import { ActionMenu, Badge, Btn, Chips, clock, Dot, Fact, Failed, field, FormSheet, isDesktop, Loading, MenuBtn, Meta, Section, SEV_LABEL, StatusBadge, Surface, timeAgo, type Tone, until, Value } from "../ui";
 
 const KIND_LABEL: Record<string, string> = {
   triggered: "Triggered",
@@ -14,6 +14,9 @@ const KIND_LABEL: Record<string, string> = {
   notify_failed: "Delivery failed",
   notify_gave_up: "Gave up delivering",
   acknowledged: "Acknowledged",
+  snoozed: "Snoozed",
+  unsnoozed: "Snooze ended",
+  reassigned: "Reassigned",
   resolved: "Resolved",
   note: "Note",
   escalation_failed: "Escalation failed",
@@ -57,6 +60,8 @@ export function IncidentDetail(props: { id: string }) {
   const detail = resource(async () => api().incident(props.id));
   const note = signal("");
   const busy = signal<string | null>(null);
+  const reassigning = signal(false);
+  const people = resource(() => reassigning() || null, async () => (await api().users()).users);
 
   // A live update reloads the timeline: at once for a change of status, at most once a minute for a repeating alert,
   // since a wide window keeps an incident open all day.
@@ -133,14 +138,31 @@ export function IncidentDetail(props: { id: string }) {
                 {d().incident.status === "triggered" && (
                   <Btn title="Page again" variant="ghost" busy={busy() === "repage"} disabled={!!busy()} onPress={() => run("repage", () => api().repage(props.id))} />
                 )}
+                <ActionMenu
+                  trigger={<MenuBtn title="More" testID="incident-more" />}
+                  items={[
+                    { label: "Snooze 30 min", onSelect: () => run("snooze", () => api().snooze(props.id, 30)) },
+                    { label: "Snooze 1 hour", onSelect: () => run("snooze", () => api().snooze(props.id, 60)) },
+                    { label: "Snooze 4 hours", onSelect: () => run("snooze", () => api().snooze(props.id, 240)) },
+                    ...(d().incident.status === "triggered" && d().escalation.nextAt
+                      ? [{ label: "Escalate now", onSelect: () => run("escalate", () => api().escalate(props.id)) }]
+                      : []),
+                    { label: "Reassign", onSelect: () => reassigning.set(true) },
+                  ]}
+                />
               </View>
             </If>
 
             <Surface>
               <Fact label="Paged" testID="paged"><Value>{d().assignees.length ? d().assignees.map((a) => a.name).join(", ") : "Nobody yet"}</Value></Fact>
+              <If when={d().incident.snoozed_until != null}>
+                <Fact label="Snoozed" testID="snoozed"><Value>{`Pages again in ${until(d().incident.snoozed_until!)}`}</Value></Fact>
+              </If>
               <Fact label="Escalation" testID="escalation">
                 <Value>
-                  {d().escalation.nextAt && d().incident.status === "triggered"
+                  {d().incident.snoozed_until != null
+                    ? "Waiting for the snooze"
+                    : d().escalation.nextAt && d().incident.status === "triggered"
                     ? `Next step in ${until(d().escalation.nextAt!)}`
                     : d().incident.status === "triggered"
                       ? "Last step reached"
@@ -178,6 +200,21 @@ export function IncidentDetail(props: { id: string }) {
               />
               <Btn title="Add note" variant="secondary" busy={busy() === "note"} disabled={!!busy() || !note().trim()} onPress={addNote} />
             </View>
+            <FormSheet open={reassigning()} onClose={() => reassigning.set(false)} title="Reassign">
+              <If when={people()} else={people.error() ? <Failed error={people.error()} onRetry={() => people.refetch()} /> : <Loading />}>
+                {(list) => (
+                  <Chips
+                    testID="reassign-people"
+                    options={list().map((u: User) => ({ id: u.id, label: u.name }))}
+                    selected={[]}
+                    onToggle={(id) => {
+                      reassigning.set(false);
+                      run("reassign", () => api().reassign(props.id, id));
+                    }}
+                  />
+                )}
+              </If>
+            </FormSheet>
           </View>
         )}
       </If>

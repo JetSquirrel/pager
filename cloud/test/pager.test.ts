@@ -104,6 +104,109 @@ describe("an incident's life", () => {
   });
 });
 
+describe("responding from a phone", () => {
+  const detail = async (token: string, id: string) => (await h.call("GET", `/v1/incidents/${id}`, { token })).json;
+
+  it("snooze stops the pages, then starts the policy over", async () => {
+    const { T, key } = await seed(h);
+    await addHook(T, "https://alice.test/");
+    const r = await fire(key);
+    await h.alarms();
+    sent = [];
+    const snoozed = (await h.call("POST", `/v1/incidents/${r.incident_id}/snooze`, { token: T, body: { minutes: 30 } })).json.incident;
+    expect(snoozed.status).toBe("acknowledged");
+    expect(snoozed.snoozed_until).toBe(Date.now() + 30 * MIN);
+    await h.alarms();
+    expect(sent.map((s) => s.body.event)).toEqual(["acknowledge"]);
+
+    sent = [];
+    await advance(29 * MIN);
+    expect(sent).toEqual([]);
+    await advance(MIN);
+    expect(sent.map((s) => s.body.event)).toEqual(["trigger"]);
+    const back = await detail(T, r.incident_id);
+    expect(back.incident).toMatchObject({ status: "triggered", snoozed_until: null, acknowledged_by: null });
+    expect(back.escalation.step).toBe(0);
+    expect(back.events.map((e: any) => e.kind)).toEqual(expect.arrayContaining(["snoozed", "unsnoozed"]));
+  });
+
+  it("resolving during a snooze ends it for good", async () => {
+    const { T, key } = await seed(h);
+    await addHook(T, "https://alice.test/");
+    const r = await fire(key);
+    await h.call("POST", `/v1/incidents/${r.incident_id}/snooze`, { token: T, body: { minutes: 30 } });
+    await h.call("POST", `/v1/incidents/${r.incident_id}/resolve`, { token: T });
+    await h.alarms();
+    sent = [];
+    await advance(31 * MIN);
+    expect(sent).toEqual([]);
+  });
+
+  it("rejects a snooze of no length", async () => {
+    const { T, key } = await seed(h);
+    const r = await fire(key);
+    expect((await h.call("POST", `/v1/incidents/${r.incident_id}/snooze`, { token: T, body: { minutes: 0 } })).status).toBe(400);
+  });
+
+  it("reassigning pages the new person and silences the old one", async () => {
+    const { T, B, bobId, key } = await seed(h);
+    await addHook(T, "https://alice.test/");
+    await addHook(B, "https://bob.test/");
+    const r = await fire(key);
+    await h.call("POST", `/v1/incidents/${r.incident_id}/acknowledge`, { token: T });
+    await h.alarms();
+    sent = [];
+    const moved = (await h.call("POST", `/v1/incidents/${r.incident_id}/reassign`, { token: T, body: { user_id: bobId } })).json.incident;
+    expect(moved).toMatchObject({ status: "triggered", assignees: [bobId], acknowledged_at: null });
+    await h.alarms();
+    expect(sent.map((s) => [s.url, s.body.event]).sort()).toEqual([["https://alice.test/", "reassign"], ["https://bob.test/", "trigger"]]);
+    expect((await detail(T, r.incident_id)).escalation.nextAt).toBe(Date.now() + 5 * MIN);
+  });
+
+  it("does not ring someone an incident has left, even for a delayed page", async () => {
+    const { T, bobId, key } = await seed(h);
+    const { json } = await addHook(T, "https://alice.test/");
+    await h.call("PATCH", `/v1/contact-methods/${json.id}`, { token: T, body: { delay_min: 2 } });
+    const r = await fire(key);
+    await h.call("POST", `/v1/incidents/${r.incident_id}/reassign`, { token: T, body: { user_id: bobId } });
+    await advance(3 * MIN);
+    expect(sent.filter((s) => s.body.event === "trigger")).toEqual([]);
+  });
+
+  it("escalates at once, and says when there is nowhere left to go", async () => {
+    const { T, B, key } = await seed(h);
+    await addHook(B, "https://bob.test/");
+    const r = await fire(key);
+    const first = await h.call("POST", `/v1/incidents/${r.incident_id}/escalate`, { token: T });
+    expect(first.status).toBe(200);
+    expect(first.json.incident.escalation_step).toBe(1);
+    await h.alarms();
+    expect(sent.map((s) => s.url)).toEqual(["https://bob.test/"]);
+    expect((await h.call("POST", `/v1/incidents/${r.incident_id}/escalate`, { token: T })).status).toBe(409);
+  });
+
+  it("acknowledges several incidents in one request", async () => {
+    const { T, key } = await seed(h);
+    const a = await fire(key, "a");
+    const b = await fire(key, "b");
+    const { json } = await h.call("POST", "/v1/incidents/bulk", { token: T, body: { action: "acknowledge", ids: [a.incident_id, b.incident_id] } });
+    expect(json.incidents.map((i: any) => i.status)).toEqual(["acknowledged", "acknowledged"]);
+  });
+
+  it("holds a delayed method back, and drops it once someone answers", async () => {
+    const { T, key } = await seed(h);
+    await addHook(T, "https://phone.test/");
+    const siren = (await addHook(T, "https://siren.test/")).json.id;
+    await h.call("PATCH", `/v1/contact-methods/${siren}`, { token: T, body: { delay_min: 2 } });
+    const r = await fire(key);
+    await h.alarms();
+    expect(sent.map((s) => s.url)).toEqual(["https://phone.test/"]);
+    await h.call("POST", `/v1/incidents/${r.incident_id}/acknowledge`, { token: T });
+    await advance(3 * MIN);
+    expect(sent.filter((s) => s.url === "https://siren.test/").map((s) => s.body.event)).toEqual(["acknowledge"]);
+  });
+});
+
 describe("delivery", () => {
   it("retries only the channel that failed, and gives up out loud", async () => {
     const { T, key } = await seed(h);

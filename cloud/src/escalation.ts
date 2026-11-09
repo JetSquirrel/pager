@@ -1,7 +1,7 @@
 // Escalation: one row per incident in `escalations`, walked by the Durable Object's single alarm.
 import { addEvent, broadcast, getIncident, notifyUsers } from "./incidents";
 import { onCallAt } from "./oncall";
-import type { EscalationPolicy, EscalationTarget, Env, Override, Rotation } from "./types";
+import type { EscalationPolicy, EscalationTarget, Env, Incident, Override, Rotation } from "./types";
 import { now, parseJson } from "./util";
 
 const MINUTE = 60_000;
@@ -66,6 +66,33 @@ export async function repage(env: Env, incidentId: string): Promise<void> {
   await advance(env, incidentId);
 }
 
+/** Moves on to the next step now instead of waiting for its timer. False when this was the last step. */
+export async function escalateNow(env: Env, incidentId: string): Promise<boolean> {
+  const esc = await env.DB.prepare(`SELECT next_at FROM escalations WHERE incident_id = ? AND stopped = 0`).bind(incidentId).first<{ next_at: number | null }>();
+  if (esc?.next_at == null) return false;
+  await advance(env, incidentId);
+  return true;
+}
+
+/** Sets the timer again from the step the incident is on, for a person who has just been handed it. */
+export async function rearm(env: Env, incidentId: string): Promise<void> {
+  const esc = await env.DB.prepare(`SELECT step FROM escalations WHERE incident_id = ?`).bind(incidentId).first<{ step: number }>();
+  const policy = await loadPolicyForIncident(env, incidentId);
+  if (!esc || !policy || policy.steps.length === 0) return;
+  const { nextDelayMs } = planStep(policy, Math.max(0, esc.step));
+  await env.DB.prepare(`UPDATE escalations SET stopped = 0, next_at = ? WHERE incident_id = ?`).bind(nextDelayMs == null ? null : now() + nextDelayMs, incidentId).run();
+}
+
+/** Sends a snoozed incident back to triggered and restarts its policy from the first step. */
+export async function endSnooze(env: Env, incident: Incident): Promise<Incident> {
+  const t = now();
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE incidents SET status = 'triggered', acknowledged_at = NULL, acknowledged_by = NULL, snoozed_until = NULL, updated_at = ? WHERE id = ?`).bind(t, incident.id),
+    addEvent(env, incident.id, "unsnoozed", { message: "Snooze ended", at: t }),
+  ]);
+  return { ...incident, status: "triggered", acknowledged_at: null, acknowledged_by: null, snoozed_until: null, updated_at: t };
+}
+
 export async function escalationStatus(env: Env, incidentId: string): Promise<{ step: number; nextAt: number | null; stopped: boolean }> {
   const r = await env.DB.prepare(`SELECT step, next_at, stopped FROM escalations WHERE incident_id = ?`)
     .bind(incidentId)
@@ -94,7 +121,11 @@ async function advance(env: Env, incidentId: string): Promise<void> {
     .first<{ step: number; stopped: number }>();
   if (!esc || esc.stopped) return;
 
-  const incident = await getIncident(env, incidentId);
+  let incident = await getIncident(env, incidentId);
+  if (incident?.snoozed_until != null && incident.status === "acknowledged") {
+    if (now() < incident.snoozed_until) return;
+    incident = await endSnooze(env, incident);
+  }
   if (!incident || incident.status !== "triggered") {
     await stopEscalation(env, incidentId);
     return;

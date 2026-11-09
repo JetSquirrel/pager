@@ -120,7 +120,8 @@ All under `/v1`, `Authorization: Bearer <token>`.
 | GET | `/incidents?status=open\|triggered\|acknowledged\|resolved\|all` | |
 | POST | `/incidents` | Open one by hand |
 | GET | `/incidents/{id}` | Incident, timeline, escalation state |
-| POST | `/incidents/{id}/acknowledge` · `/resolve` · `/notes` · `/repage` | |
+| POST | `/incidents/{id}/acknowledge` · `/resolve` · `/notes` · `/repage` · `/snooze` · `/reassign` · `/escalate` | |
+| POST | `/incidents/bulk` | Acknowledge or resolve up to 50 at once |
 | GET | `/oncall` | Who is on call now and next |
 | GET/POST/PUT | `/schedules`, `/schedules/{id}/overrides` | Rotations and take-overs |
 | GET/POST/PUT | `/escalation-policies`, `/{id}/preview` | |

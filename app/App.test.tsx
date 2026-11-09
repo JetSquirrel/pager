@@ -233,6 +233,122 @@ test("a wide window shows the list and the incident side by side", async () => {
   }
 });
 
+const detailOf = (over: Record<string, unknown> = {}) => ({
+  body: {
+    incident: incident(over),
+    events: [{ id: 1, at: Date.now() - 60_000, kind: "triggered", actor: null, actor_name: null, message: "Disk 95% on db1" }],
+    escalation: { step: 0, nextAt: Date.now() + 9 * 60_000, stopped: false },
+    assignees: [{ id: "usr_1", name: "Alice", email: "alice@example.com" }],
+  },
+});
+
+test("filters to my incidents, and keeps history apart", async () => {
+  const theirs = incident({ id: "inc_2", number: 8, title: "Queue backing up", assignees: ["usr_2"] });
+  const app = await open("App.tsx", {
+    storage: signedIn,
+    network: api({
+      [`GET ${SERVER}/v1/incidents?status=open&limit=100`]: { body: { incidents: [incident(), theirs] } },
+      [`GET ${SERVER}/v1/incidents?status=resolved&limit=50`]: { body: { incidents: [incident({ id: "inc_3", number: 3, title: "Old outage", status: "resolved" })] } },
+    }),
+  });
+  await app.waitFor("Disk 95% on db1");
+  expect(app.shows("Queue backing up")).toBe(false);
+  await app.press("id:incident-filter >> All");
+  await app.waitFor("Queue backing up");
+  await app.press("id:incident-filter >> History");
+  await app.waitFor("Old outage");
+  expect(app.shows("Disk 95% on db1")).toBe(false);
+});
+
+test("acknowledges everything that is paging me at once", async () => {
+  const two = incident({ id: "inc_2", number: 8, title: "Queue backing up" });
+  const posts: any[] = [];
+  const app = await open("App.tsx", {
+    storage: signedIn,
+    network: api({
+      [`GET ${SERVER}/v1/incidents?status=open&limit=100`]: { body: { incidents: [incident(), two] } },
+      [`POST ${SERVER}/v1/incidents/bulk`]: (req: { body: string }) => {
+        posts.push(JSON.parse(req.body));
+        return { body: { incidents: [incident({ status: "acknowledged" }), { ...two, status: "acknowledged" }] } };
+      },
+    }),
+  });
+  await app.press("Acknowledge all");
+  await app.waitFor("All quiet");
+  expect(posts).toEqual([{ action: "acknowledge", ids: ["inc_1", "inc_2"] }]);
+});
+
+test("snoozes and reassigns from the incident", async () => {
+  const posts: Record<string, unknown>[] = [];
+  let snoozed: number | null = null;
+  const app = await open("App.tsx", {
+    storage: signedIn,
+    network: api({
+      [`GET ${SERVER}/v1/incidents/inc_1`]: () => detailOf({ snoozed_until: snoozed, status: snoozed ? "acknowledged" : "triggered" }),
+      [`GET ${SERVER}/v1/users`]: { body: { users: [user, { id: "usr_2", email: "bob@example.com", name: "Bob", role: "responder" }] } },
+      [`POST ${SERVER}/v1/incidents/inc_1/snooze`]: (req: { body: string }) => {
+        posts.push(JSON.parse(req.body));
+        snoozed = Date.now() + 3_600_000;
+        return { body: { incident: incident({ status: "acknowledged", snoozed_until: snoozed }) } };
+      },
+      [`POST ${SERVER}/v1/incidents/inc_1/reassign`]: (req: { body: string }) => {
+        posts.push(JSON.parse(req.body));
+        snoozed = null;
+        return { body: { incident: incident({ assignees: ["usr_2"] }) } };
+      },
+    }),
+  });
+  await app.press("Disk 95% on db1");
+  await app.waitFor("id:paged >> Alice");
+  await app.press("id:incident-more");
+  await app.press("Snooze 1 hour");
+  await app.waitFor("id:snoozed >> Pages again in 1h 0m");
+  await app.press("id:incident-more");
+  await app.press("Reassign");
+  await app.press("id:reassign-people >> Bob");
+  await app.waitFor("id:escalation >> Next step in 9m");
+  expect(posts).toEqual([{ minutes: 60 }, { user_id: "usr_2" }]);
+});
+
+test("opens an incident by hand", async () => {
+  const posts: unknown[] = [];
+  const app = await open("App.tsx", {
+    storage: signedIn,
+    network: api({
+      [`GET ${SERVER}/v1/services`]: { body: { services: [{ id: "svc_1", name: "API", escalation_policy_id: "pol_1", open_incidents: 0 }] } },
+      [`POST ${SERVER}/v1/incidents`]: (req: { body: string }) => {
+        posts.push(JSON.parse(req.body));
+        return { status: 201, body: { incident: incident({ id: "inc_9", number: 9, title: "Checkout down" }) } };
+      },
+      [`GET ${SERVER}/v1/incidents/inc_9`]: detailOf({ id: "inc_9", number: 9, title: "Checkout down" }),
+    }),
+  });
+  await app.waitFor("Disk 95% on db1");
+  await app.press("id:new-incident");
+  await app.type("id:incident-title", "Checkout down");
+  await app.press("id:incident-service >> API");
+  await app.press("Page the on-call");
+  await app.waitFor("id:paged >> Alice");
+  expect(posts).toEqual([{ service_id: "svc_1", title: "Checkout down", severity: "critical" }]);
+});
+
+test("shows my own shifts first", async () => {
+  const app = await open("App.tsx", {
+    storage: signedIn,
+    network: api({
+      [`GET ${SERVER}/v1/oncall`]: {
+        body: {
+          schedules: [
+            { id: "sch_1", name: "Primary", current: { user_id: "usr_1", user, starts_at: Date.now() - 1000, ends_at: Date.now() + 7_200_000, override: false }, next: [] },
+          ],
+        },
+      },
+    }),
+  });
+  await app.press("On call");
+  await app.waitFor("id:on-call-now >> Primary");
+});
+
 test("takes over a shift from the menu", async () => {
   const posts: unknown[] = [];
   const app = await open("App.tsx", {

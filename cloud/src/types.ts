@@ -99,9 +99,11 @@ export interface Incident {
   acknowledged_by: string | null;
   resolved_at: number | null;
   resolved_by: string | null;
+  snoozed_until: number | null;
 }
 
-export type NotifyEvent = "trigger" | "acknowledge" | "resolve" | "test";
+/** "reassign" tells the people an incident was taken away from: it silences their devices like an acknowledgement. */
+export type NotifyEvent = "trigger" | "acknowledge" | "resolve" | "reassign" | "test";
 
 /** What an integration hands to the core after parsing its own payload format. */
 export interface AlertEvent {

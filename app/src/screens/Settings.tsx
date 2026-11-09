@@ -19,6 +19,9 @@ const ICON: Record<string, IconName> = { ntfy: "phone", tuya: "zap", slack: "has
 
 const SEVERITIES: Severity[] = ["info", "warning", "error", "critical"];
 
+const DELAYS = [0, 2, 5, 10, 15];
+const delayLabel = (min: number) => (min ? `After ${min} min` : "At once");
+
 function describe(cm: ContactMethod): string {
   const c = cm.config as Record<string, string>;
   switch (cm.type) {
@@ -82,6 +85,14 @@ function MethodRow(props: { cm: () => ContactMethod; reload: () => void }) {
               label: `${SEV_LABEL[s]} and up`,
               checked: s === cm().min_severity,
               onSelect: () => guard(() => api().updateContactMethod(cm().id, { min_severity: s })),
+            }))}
+          />
+          <ActionMenu
+            trigger={<MenuBtn title={delayLabel(cm().delay_min)} testID={`delay-${cm().id}`} />}
+            items={DELAYS.map((min) => ({
+              label: delayLabel(min),
+              checked: min === cm().delay_min,
+              onSelect: () => guard(() => api().updateContactMethod(cm().id, { delay_min: min })),
             }))}
           />
           <Btn title="Send test" variant="ghost" onPress={() => guard(() => api().testContactMethod(cm().id), "Test page sent")} />

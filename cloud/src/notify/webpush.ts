@@ -103,7 +103,7 @@ export async function newVapidKeys(): Promise<{ publicKey: string; privateJwk: J
 /** What the service worker (app/web/sw.js) turns into a notification. */
 export async function pushPayload(env: Env, incident: Incident, userId: string, event: NotifyEvent) {
   const paging = event === "trigger";
-  const verb = event === "acknowledge" ? "Acknowledged" : event === "resolve" ? "Resolved" : event === "test" ? "Test page" : "";
+  const verb = event === "acknowledge" ? "Acknowledged" : event === "resolve" ? "Resolved" : event === "reassign" ? "Reassigned" : event === "test" ? "Test page" : "";
   return {
     title: `${verb ? `${verb}: ` : ""}#${incident.number} ${incident.title}`.slice(0, 160),
     body: [incident.service_name, incident.severity].filter(Boolean).join("  "),

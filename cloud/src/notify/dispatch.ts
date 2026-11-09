@@ -16,6 +16,7 @@ export interface ContactMethodRow {
   config: string;
   min_severity: string;
   enabled: number;
+  delay_min: number;
 }
 
 interface OutboxRow {
@@ -71,7 +72,7 @@ export async function enqueue(env: Env, incident: Incident, userIds: string[], e
   const t = now();
   const unreachable = event === "trigger" ? userIds.filter((u) => !methods.some((m) => m.user_id === u)) : [];
   await env.DB.batch([
-    ...methods.map((cm) => insertRow(env, incident.id, cm.user_id, cm.id, event, t)),
+    ...methods.map((cm) => insertRow(env, incident.id, cm.user_id, cm.id, event, event === "trigger" ? t + cm.delay_min * 60_000 : t)),
     ...unreachable.map((u) => addEvent(env, incident.id, "notify_failed", { actor: u, message: "No contact method reaches this person for this severity", at: t })),
   ]);
   env.wake();
@@ -101,7 +102,9 @@ async function deliverRow(env: Env, row: OutboxRow): Promise<void> {
   const isTest = row.incident_id.startsWith("test_");
   const incident = isTest ? testIncident(row.incident_id) : await getIncident(env, row.incident_id);
   // A page that comes due after the incident was acknowledged must not ring the siren again.
-  if (!incident || (row.event === "trigger" && incident.status !== "triggered")) return void (await done(env, row.id));
+  // Nor one held back by a delay that belongs to someone the incident has since left.
+  const stale = row.event === "trigger" && (incident?.status !== "triggered" || !incident.assignees.includes(row.user_id));
+  if (!incident || stale) return void (await done(env, row.id));
   const cm = await env.DB.prepare(`SELECT * FROM contact_methods WHERE id = ?`).bind(row.contact_method_id).first<ContactMethodRow>();
   if (!cm) return void (await done(env, row.id));
 
@@ -155,5 +158,6 @@ function testIncident(id: string): Incident {
     acknowledged_by: null,
     resolved_at: null,
     resolved_by: null,
+    snoozed_until: null,
   };
 }

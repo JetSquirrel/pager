@@ -24,6 +24,7 @@ const verb: Record<NotifyEvent, string> = {
   trigger: "TRIGGERED",
   acknowledge: "Acknowledged",
   resolve: "Resolved",
+  reassign: "Reassigned",
   test: "Test page",
 };
 

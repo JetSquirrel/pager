@@ -82,7 +82,7 @@ export function toDevice(d: RawTuyaDevice): TuyaDevice {
 }
 
 export function commandsFor(cfg: TuyaConfig, event: NotifyEvent, severity: Incident["severity"]): TuyaCommand[] {
-  if (event === "acknowledge" || event === "resolve") return cfg.on_clear ?? [];
+  if (event === "acknowledge" || event === "resolve" || event === "reassign") return cfg.on_clear ?? [];
   return cfg.by_severity?.[severity] ?? cfg.on_trigger ?? [];
 }
 

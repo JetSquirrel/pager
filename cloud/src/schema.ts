@@ -135,4 +135,10 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX outbox_due ON outbox (due_at);
   `,
+  `
+  -- A snoozed incident is acknowledged until this time, then pages from the first step again.
+  ALTER TABLE incidents ADD COLUMN snoozed_until INTEGER;
+  -- Minutes after a page before this method is used: push first, the siren if nobody has answered.
+  ALTER TABLE contact_methods ADD COLUMN delay_min INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
