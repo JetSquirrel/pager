@@ -1,0 +1,23 @@
+{
+  "name": "pager-cloud",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "npm run build:web && wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply pager --local",
+    "db:migrate": "wrangler d1 migrations apply pager --remote",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build:web": "node scripts/build-web.mjs"
+  },
+  "dependencies": {
+    "hono": "^4.13.16"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261106.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7",
+    "wrangler": "^4.158.0"
+  }
+}

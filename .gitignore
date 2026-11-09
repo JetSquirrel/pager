@@ -1,0 +1,12 @@
+node_modules/
+.wrangler/
+.dev.vars
+.nsh/
+target/
+.ref/
+cloud/public/app/
+hardware/TuyaOpen/
+hardware/build.log
+hardware/pager-t5ai/.build/
+hardware/pager-t5ai/dist/
+.claude/

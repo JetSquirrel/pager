@@ -1,0 +1,33 @@
+{
+  "name": "Pager",
+  "id": "dev.pager.app",
+  "version": "0.1.0",
+  "build": 1,
+  "appearance": "system",
+  "tailwind": {
+    "colors": {
+      "sev-critical": "#dc2626",
+      "sev-error": "#ea580c",
+      "sev-warning": "#ca8a04",
+      "sev-info": "#2563eb",
+      "ok": "#16a34a"
+    }
+  },
+  "web": {
+    "host": "./host.js"
+  },
+  "capabilities": {
+    "network": {
+      "hosts": [
+        "*"
+      ]
+    },
+    "host": [
+      "pageInfo",
+      "notify",
+      "requestNotifications"
+    ],
+    "statusBar": true,
+    "clipboard": true
+  }
+}

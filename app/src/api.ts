@@ -1,0 +1,169 @@
+// Typed client for the pager Worker (cloud/src/index.ts).
+
+export type Severity = "critical" | "error" | "warning" | "info";
+export type Status = "triggered" | "acknowledged" | "resolved";
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  role: "admin" | "responder";
+}
+
+export interface Incident {
+  id: string;
+  number: number;
+  service_id: string;
+  service_name?: string;
+  title: string;
+  severity: Severity;
+  status: Status;
+  source: string;
+  details: Record<string, unknown>;
+  alert_count: number;
+  escalation_step: number;
+  assignees: string[];
+  created_at: number;
+  updated_at: number;
+  acknowledged_at: number | null;
+  acknowledged_by: string | null;
+  resolved_at: number | null;
+}
+
+export interface IncidentEvent {
+  id: number;
+  at: number;
+  kind: string;
+  actor: string | null;
+  actor_name: string | null;
+  message: string;
+}
+
+export interface IncidentDetail {
+  incident: Incident;
+  events: IncidentEvent[];
+  escalation: { step: number; nextAt: number | null; stopped: boolean };
+  assignees: { id: string; name: string; email: string }[];
+}
+
+export interface Shift {
+  user_id: string;
+  starts_at: number;
+  ends_at: number;
+  override: boolean;
+  user: { id: string; name: string; email: string } | null;
+}
+
+export interface OnCall {
+  at: number;
+  schedules: { id: string; name: string; current: Shift | null; next: Shift[] }[];
+}
+
+export interface ContactMethod {
+  id: string;
+  type: "tuya" | "ntfy" | "webhook" | "slack";
+  label: string;
+  config: Record<string, unknown>;
+  min_severity: Severity;
+  enabled: boolean;
+}
+
+export interface Service {
+  id: string;
+  name: string;
+  escalation_policy_id: string;
+  open_incidents: number;
+  integration_key?: string;
+  endpoints?: { events: string; alertmanager: string; grafana: string };
+}
+
+export interface PolicyTarget {
+  type: "user" | "schedule";
+  id: string;
+}
+
+export interface Policy {
+  id: string;
+  name: string;
+  repeat: number;
+  steps: { delay_min: number; targets: PolicyTarget[] }[];
+}
+
+export interface ScheduleDef {
+  id: string;
+  name: string;
+  rotation: { start: number; shift_hours: number; users: string[] };
+}
+
+export interface Session {
+  server: string;
+  token: string;
+}
+
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export class Api {
+  constructor(public session: Session) {}
+
+  private url(path: string) {
+    return this.session.server.replace(/\/+$/, "") + "/v1" + path;
+  }
+
+  async call<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const res = await fetch(this.url(path), {
+      method,
+      headers: {
+        Authorization: `Bearer ${this.session.token}`,
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (res.status === 204) return undefined as T;
+    const json = (await res.json().catch(() => ({}))) as { error?: string };
+    if (!res.ok) throw new ApiError(res.status, json.error ?? `HTTP ${res.status}`);
+    return json as T;
+  }
+
+  me = () => this.call<{ user: User }>("GET", "/me");
+  incidents = (status: "open" | "resolved" | "all" = "open", limit = 100) =>
+    this.call<{ incidents: Incident[] }>("GET", `/incidents?status=${status}&limit=${limit}`);
+  incident = (id: string) => this.call<IncidentDetail>("GET", `/incidents/${id}`);
+  acknowledge = (id: string) => this.call<{ incident: Incident }>("POST", `/incidents/${id}/acknowledge`);
+  resolve = (id: string) => this.call<{ incident: Incident }>("POST", `/incidents/${id}/resolve`);
+  repage = (id: string) => this.call<{ ok: true }>("POST", `/incidents/${id}/repage`);
+  note = (id: string, message: string) => this.call<{ ok: true }>("POST", `/incidents/${id}/notes`, { message });
+  oncall = () => this.call<OnCall>("GET", "/oncall");
+  takeShift = (scheduleId: string, startsAt: number, endsAt: number) =>
+    this.call<{ id: string }>("POST", `/schedules/${scheduleId}/overrides`, { starts_at: startsAt, ends_at: endsAt });
+  contactMethods = () => this.call<{ contact_methods: ContactMethod[]; tuya_presets: string[] }>("GET", "/contact-methods");
+  addContactMethod = (cm: { type: string; label: string; config: Record<string, unknown>; min_severity?: Severity }) =>
+    this.call<{ id: string }>("POST", "/contact-methods", cm);
+  updateContactMethod = (id: string, patch: { enabled?: boolean; min_severity?: Severity; label?: string }) =>
+    this.call<{ ok: true }>("PATCH", `/contact-methods/${id}`, patch);
+  deleteContactMethod = (id: string) => this.call<void>("DELETE", `/contact-methods/${id}`);
+  testContactMethod = (id: string) => this.call<{ ok: true }>("POST", `/contact-methods/${id}/test`);
+
+  // ---- admin
+  users = () => this.call<{ users: User[] }>("GET", "/users");
+  addUser = (u: { email: string; name: string; role: "admin" | "responder" }) =>
+    this.call<{ user_id: string; token: string }>("POST", "/users", u);
+  services = () => this.call<{ services: Service[] }>("GET", "/services");
+  addService = (s: { name: string; escalation_policy_id: string }) =>
+    this.call<{ id: string; integration_key: string }>("POST", "/services", s);
+  policies = () => this.call<{ policies: Policy[] }>("GET", "/escalation-policies");
+  addPolicy = (p: Omit<Policy, "id">) => this.call<{ id: string }>("POST", "/escalation-policies", p);
+  schedules = () => this.call<{ schedules: ScheduleDef[] }>("GET", "/schedules");
+  addSchedule = (s: { name: string; rotation: { shift_hours: number; users: string[]; start?: number } }) =>
+    this.call<{ id: string }>("POST", "/schedules", s);
+
+  streamUrl() {
+    return this.url("/stream").replace(/^http/, "ws") + `?token=${encodeURIComponent(this.session.token)}`;
+  }
+}
