@@ -106,7 +106,7 @@ export interface Incident {
 }
 
 /** "reassign" tells the people an incident was taken away from: it silences their devices like an acknowledgement. */
-export type NotifyEvent = "trigger" | "acknowledge" | "resolve" | "reassign" | "test";
+export type NotifyEvent = "trigger" | "acknowledge" | "resolve" | "reassign" | "test" | "notice";
 
 /** What an integration hands to the core after parsing its own payload format. */
 export interface AlertEvent {

@@ -5,6 +5,7 @@ import { Db, KvTable, migrate, type SqlLike } from "./db";
 import { deviceStateFor, openIncidents } from "./devices";
 import { dueEscalations } from "./escalation";
 import { drainOutbox, nextDelivery } from "./notify/dispatch";
+import { nextSweep, sweepTuya } from "./notify/tuya-health";
 import { newVapidKeys, type Vapid } from "./notify/webpush";
 import { MIGRATIONS } from "./schema";
 import type { Bindings, Env } from "./types";
@@ -76,6 +77,7 @@ export class Pager extends DurableObject<Bindings> {
     try {
       await dueEscalations(this.view, now());
       await drainOutbox(this.view, now());
+      await sweepTuya(this.view, now());
       this.prune();
     } finally {
       this.arm();
@@ -88,6 +90,7 @@ export class Pager extends DurableObject<Bindings> {
     const due = [
       this.db.execute("SELECT MIN(next_at) AS at FROM escalations WHERE next_at IS NOT NULL", []).rows[0]?.at as number | null,
       nextDelivery(this.db),
+      nextSweep(this.db, this.kv, !!(this.env.TUYA_CLIENT_ID && this.env.TUYA_CLIENT_SECRET)),
       Number(this.kv.read("pruned_at") ?? now()) + DAY,
     ].filter((x): x is number => x != null);
     void this.ctx.storage.setAlarm(Math.max(now(), Math.min(...due)));

@@ -6,7 +6,7 @@ import type { AppEnv } from "./auth";
 import { requireUser } from "./auth";
 import { DEVICE_SEEN_MS } from "./budget";
 import type { Db } from "./db";
-import { acknowledge, rowToIncident } from "./incidents";
+import { acknowledge, rowToIncident, snooze } from "./incidents";
 import type { Env, Incident, User } from "./types";
 import { HttpError, newId, newSecret, now, sha256Hex } from "./util";
 
@@ -96,6 +96,16 @@ deviceApi.post("/ack", async (c) => {
   const mine = openIncidents(c.env.DB).filter((i) => i.status === "triggered" && i.assignees.includes(d.user_id));
   for (const i of mine) await acknowledge(c.env, c.executionCtx, i, d.user_id, `Acknowledged on ${d.name}`);
   return c.json({ acknowledged: mine.map((i) => i.number) });
+});
+
+/** POST /v1/device/snooze?minutes=30 — the long press: quiet now, and the page comes back if nobody has dealt with it. */
+deviceApi.post("/snooze", async (c) => {
+  const d = c.get("device");
+  const minutes = Number(c.req.query("minutes") ?? 30);
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 240) throw new HttpError(400, "minutes must be a whole number from 1 to 240");
+  const mine = openIncidents(c.env.DB).filter((i) => i.status === "triggered" && i.assignees.includes(d.user_id));
+  for (const i of mine) await snooze(c.env, c.executionCtx, i, d.user_id, minutes);
+  return c.json({ snoozed: mine.map((i) => i.number), minutes });
 });
 
 // ------------------------------------------------------------------ users managing their devices

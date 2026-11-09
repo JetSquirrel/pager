@@ -77,7 +77,7 @@ function MyShifts(props: { schedules: () => Sched[] }) {
       <Surface>
         {now().map((s) => (
           <Row testID="on-call-now">
-            <Badge label="On call" tone="ok" />
+            <View><Badge label="On call" tone="ok" /></View>
             <Text class="flex-1 text-sm font-medium text-card-foreground" numberOfLines={1}>{s.name}</Text>
             <Meta>Ends in {until(s.current!.ends_at)}</Meta>
           </Row>

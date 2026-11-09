@@ -1,10 +1,10 @@
-import { resource, signal, Text, token, View } from "nsh";
+import { Clipboard, resource, signal, Text, token, View } from "nsh";
 import { AlertDialog, Input, Switch } from "nsh/base";
-import type { ContactMethod, Severity } from "../api";
+import type { ContactMethod, HardwarePager, Severity, TuyaDevice } from "../api";
 import { pushEnable, pushState } from "../host";
 import { api, me, session, signOut } from "../store";
 import { toast } from "../toast";
-import { ActionMenu, Badge, Btn, Callout, Chips, Dot, Failed, Field, field, FormSheet, Icon, IconBtn, type IconName, isDesktop, Loading, MenuBtn, Meta, Page, Row, Section, Segmented, SEV_LABEL, Surface } from "../ui";
+import { ActionMenu, Badge, Btn, Callout, Chips, Dot, Failed, Field, field, FormSheet, Icon, IconBtn, type IconName, isDesktop, Loading, MenuBtn, Meta, Page, Row, Section, Segmented, SEV_LABEL, Surface, timeAgo } from "../ui";
 
 type Kind = ContactMethod["type"];
 
@@ -20,6 +20,9 @@ const ICON: Record<string, IconName> = { ntfy: "phone", tuya: "zap", slack: "has
 const SEVERITIES: Severity[] = ["info", "warning", "error", "critical"];
 
 const DELAYS = [0, 2, 5, 10, 15];
+/** A board writes last_seen every five minutes while it is polling. */
+const boardOnline = (d: HardwarePager) => d.last_seen_at !== null && Date.now() - d.last_seen_at < 11 * 60_000;
+
 const delayLabel = (min: number) => (min ? `After ${min} min` : "At once");
 
 function describe(cm: ContactMethod): string {
@@ -113,13 +116,14 @@ function AddMethod(props: { open: boolean; onClose: () => void; presets: string[
   const a = signal(""); // topic / device id / url
   const b = signal(""); // ntfy server / tuya preset
   const busy = signal(false);
+  const tuya = resource(() => (props.open && kind() === "tuya") || null, async () => api().tuyaDevices());
 
   const config = (): Record<string, unknown> => {
     switch (kind()) {
       case "ntfy":
         return { topic: a(), server: b() || "https://ntfy.sh" };
       case "tuya":
-        return { device_id: a(), preset: b() || "siren" };
+        return { device_id: a(), preset: b() || "auto" };
       case "slack":
         return { webhook_url: a() };
       default:
@@ -152,6 +156,19 @@ function AddMethod(props: { open: boolean; onClose: () => void; presets: string[
       <Field label="Label">
         <Input value={label()} onChange={(value) => label.set(value)} placeholder="Desk siren" class={field} />
       </Field>
+      <If when={kind() === "tuya" && tuya()?.configured && tuya()!.devices.length > 0}>
+        <Field label="Your devices">
+          <Chips
+            testID="tuya-devices"
+            options={tuya()!.devices.map((d: TuyaDevice) => ({ id: d.id, label: d.online ? d.name : `${d.name} (offline)` }))}
+            selected={a() ? [a()] : []}
+            onToggle={(id) => {
+              a.set(id);
+              if (!label()) label.set(tuya()!.devices.find((d: TuyaDevice) => d.id === id)!.name);
+            }}
+          />
+        </Field>
+      </If>
       <Field label={kind() === "ntfy" ? "Topic" : kind() === "tuya" ? "Device ID" : "URL"} hint={kind() === "ntfy" ? "Long and random, like pager-alice-7f3k9q." : undefined}>
         <Input value={a()} onChange={(value) => a.set(value)} autoCapitalize="none" autoCorrect={false} placeholder={kind() === "ntfy" || kind() === "tuya" ? "" : "https://…"} class={field} />
       </Field>
@@ -161,11 +178,11 @@ function AddMethod(props: { open: boolean; onClose: () => void; presets: string[
         </Field>
       </If>
       <If when={kind() === "tuya"}>
-        <Field label="Preset">
-          <Chips options={props.presets.map((p) => ({ id: p, label: p }))} selected={[b() || "siren"]} onToggle={(id) => b.set(id)} />
+        <Field label="Commands" hint="Auto reads what the device can do and rings it as loud as it goes.">
+          <Chips testID="tuya-preset" options={props.presets.map((p) => ({ id: p, label: p === "auto" ? "Auto" : p }))} selected={[b() || "auto"]} onToggle={(id) => b.set(id)} />
         </Field>
       </If>
-      <Btn title={busy() ? "Adding…" : "Add"} busy={busy()} disabled={!a()} onPress={add} />
+      <Btn title={busy() ? "Adding…" : "Add"} testID="save-method" busy={busy()} disabled={!a()} onPress={add} />
     </FormSheet>
   );
 }
@@ -246,6 +263,56 @@ function AlarmCheck(props: { methods: ContactMethod[] }) {
   );
 }
 
+/** T5AI boards that ring on their own: their token is shown once, to type into the serial console. */
+function HardwarePagers() {
+  const list = resource(async () => api().hardwarePagers());
+  const issued = signal<string | null>(null);
+  const busy = signal(false);
+  const add = async () => {
+    busy.set(true);
+    try {
+      issued.set((await api().addHardwarePager("T5AI pager")).token);
+      list.refetch();
+    } catch (e) {
+      toast(String((e as Error).message ?? e), "error");
+    } finally {
+      busy.set(false);
+    }
+  };
+  const remove = (d: HardwarePager) => api().deleteHardwarePager(d.id).then(() => list.refetch(), (e) => toast(String(e.message ?? e), "error"));
+  return (
+    <Section title="Hardware pagers" count={list()?.devices.length} right={<Btn title="Add" testID="add-board" variant="ghost" icon="plus" busy={busy()} onPress={add} />}>
+      <View class="gap-2">
+        <If when={issued()}>
+          {(t) => (
+            <Callout title="Token, shown once. On the board: pager_token">
+              <Text class="font-mono text-xs text-foreground" selectable>{t()}</Text>
+              <View class="flex-row gap-2">
+                <Btn title="Copy token" variant="secondary" icon="copy" onPress={() => Clipboard.writeText(t()).then(() => toast("Token copied"))} />
+                <Btn title="Done" variant="ghost" onPress={() => issued.set(null)} />
+              </View>
+            </Callout>
+          )}
+        </If>
+        <If when={list()?.devices.length}>
+          <Surface>
+            {list()!.devices.map((d: HardwarePager) => (
+              <Row>
+                <Dot tone={boardOnline(d) ? "ok" : "critical"} />
+                <View class="flex-1 gap-0.5">
+                  <Text class="text-sm font-medium text-card-foreground" numberOfLines={1}>{d.name}</Text>
+                  <Meta>{boardOnline(d) ? "Online" : d.last_seen_at ? `Last seen ${timeAgo(d.last_seen_at)}` : "Never connected"}{d.firmware ? `  ${d.firmware}` : ""}</Meta>
+                </View>
+                <IconBtn icon="trash" label={`Remove ${d.name}`} onPress={() => remove(d)} />
+              </Row>
+            ))}
+          </Surface>
+        </If>
+      </View>
+    </Section>
+  );
+}
+
 export function Settings() {
   const methods = resource(async () => api().contactMethods());
   const adding = signal(false);
@@ -271,7 +338,7 @@ export function Settings() {
 
       <If when={methods()}>{(m) => <AlarmCheck methods={m().contact_methods} />}</If>
 
-      <Section title="How you get paged" right={<Btn title="Add" variant="ghost" icon="plus" onPress={() => adding.set(true)} />}>
+      <Section title="How you get paged" right={<Btn title="Add" testID="add-method" variant="ghost" icon="plus" onPress={() => adding.set(true)} />}>
         <If when={methods()} else={methods.error() ? <Failed error={methods.error()} onRetry={() => methods.refetch()} /> : <Loading />}>
           {(m) => (
             <View class="gap-2">
@@ -288,6 +355,8 @@ export function Settings() {
           )}
         </If>
       </Section>
+
+      <HardwarePagers />
     </Page>
   );
 }

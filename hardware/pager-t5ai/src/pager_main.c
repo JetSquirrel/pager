@@ -4,7 +4,9 @@
  *
  * The board long-polls the pager Worker (GET /v1/device/state?v=..&wait=20) with its device token. While an
  * incident pages its owner it flashes the LED and sounds a siren; a press of the button acknowledges every
- * page (POST /v1/device/ack). Settings live in flash and are set over the serial console:
+ * page (POST /v1/device/ack); holding it for two seconds snoozes them for 30 minutes instead (POST
+ * /v1/device/snooze). A board that has lost the server for 5 minutes chirps once a minute: a pager that cannot be
+ * reached must not look like one with nothing to say. Settings live in flash and are set over the serial console:
  *
  *   pager_wifi <ssid> [password]
  *   pager_url  http://192.168.1.20:8787  |  https://pager.example.com
@@ -49,6 +51,9 @@
 #define BACKOFF_MAX_MS    30000
 #define SAMPLE_RATE       16000
 #define SIREN_VOLUME      80
+#define SNOOZE_PATH       "/v1/device/snooze?minutes=30"
+#define OFFLINE_CHIRP_AFTER_MS (5 * 60 * 1000)
+#define OFFLINE_CHIRP_EVERY_MS (60 * 1000)
 
 extern const char PAGER_CA_BUNDLE[];
 extern const size_t PAGER_CA_BUNDLE_LEN;
@@ -95,6 +100,7 @@ static SEM_HANDLE sg_ack_sem;
 static SEM_HANDLE sg_wake_sem; // nudges the poller (new config, ack done)
 static volatile bool sg_net_up = false;
 static volatile bool sg_test_ring = false;
+static volatile bool sg_snooze_wanted = false; // the next post of sg_ack_sem means snooze, not acknowledge
 
 static TDL_LED_HANDLE_T sg_led;
 static TDL_AUDIO_HANDLE_T sg_audio;
@@ -324,12 +330,14 @@ static void __ack_task(void *arg)
     (void)arg;
     for (;;) {
         tal_semaphore_wait_forever(sg_ack_sem);
-        if (!__configured() || !sg_net_up) continue;
+        bool snooze = sg_snooze_wanted;
+        sg_snooze_wanted = false;
         cJSON *j = NULL;
-        int status = __pager_request("POST", "/v1/device/ack", 15000, &j);
+        /* No network means the press reached nobody: fall through and ring again, or the page is silently lost. */
+        int status = (__configured() && sg_net_up) ? __pager_request("POST", snooze ? SNOOZE_PATH : "/v1/device/ack", 15000, &j) : -1;
         if (status == 200) {
-            cJSON *list = j ? cJSON_GetObjectItem(j, "acknowledged") : NULL;
-            PR_NOTICE("acknowledged %d incident(s)", cJSON_IsArray(list) ? cJSON_GetArraySize(list) : 0);
+            cJSON *list = j ? cJSON_GetObjectItem(j, snooze ? "snoozed" : "acknowledged") : NULL;
+            PR_NOTICE("%s %d incident(s)", snooze ? "snoozed" : "acknowledged", cJSON_IsArray(list) ? cJSON_GetArraySize(list) : 0);
         } else {
             /* Didn't go through: ring again so the page isn't silently lost. */
             tal_mutex_lock(sg_mutex);
@@ -396,6 +404,7 @@ static void __mic_cb(TDL_AUDIO_FRAME_FORMAT_E type, TDL_AUDIO_STATUS_E status, u
 static void __alarm_task(void *arg)
 {
     int led_mode = -1;
+    SYS_TIME_T lost_at = 0, chirped_at = 0;
     (void)arg;
     for (;;) {
         tal_mutex_lock(sg_mutex);
@@ -435,6 +444,17 @@ static void __alarm_task(void *arg)
                 tal_system_sleep(2000);
             }
         } else {
+            /* Only a board that has been set up can be missing its server. */
+            SYS_TIME_T t = tal_system_get_millisecond();
+            if (sg_st.link != LINK_OFFLINE) {
+                lost_at = 0;
+            } else if (lost_at == 0) {
+                lost_at = t;
+            } else if (t - lost_at >= OFFLINE_CHIRP_AFTER_MS && t - chirped_at >= OFFLINE_CHIRP_EVERY_MS) {
+                chirped_at = t;
+                PR_WARN("server unreachable for %u s", (uint32_t)((t - lost_at) / 1000));
+                __play(1800, 80, 12000);
+            }
             tal_system_sleep(100);
         }
     }
@@ -452,9 +472,14 @@ static void __button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
             sg_test_ring = false;
             return;
         }
+        /* Silence at once. What the press means is known only when it ends: a tap acknowledges, a hold snoozes. */
+        tal_mutex_lock(sg_mutex);
+        sg_st.muted = true;
+        tal_mutex_unlock(sg_mutex);
+    } else if (event == TDL_BUTTON_PRESS_SINGLE_CLICK || event == TDL_BUTTON_PRESS_DOUBLE_CLICK ||
+               event == TDL_BUTTON_PRESS_REPEAT) {
         tal_mutex_lock(sg_mutex);
         bool alerting = sg_st.alert;
-        sg_st.muted = true; // silence at once; the server's answer confirms
         tal_mutex_unlock(sg_mutex);
         if (alerting) {
             PR_NOTICE("button: acknowledging");
@@ -463,6 +488,14 @@ static void __button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
     } else if (event == TDL_BUTTON_LONG_PRESS_START) {
         PR_NOTICE("button: link=%d alert=%d count=%d acked=%d %s", sg_st.link, sg_st.alert, sg_st.count, sg_st.acked,
                   sg_st.title);
+        tal_mutex_lock(sg_mutex);
+        bool alerting = sg_st.alert;
+        tal_mutex_unlock(sg_mutex);
+        if (alerting) {
+            PR_NOTICE("button: snoozing");
+            sg_snooze_wanted = true;
+            tal_semaphore_post(sg_ack_sem);
+        }
     }
 }
 
@@ -602,6 +635,9 @@ static void user_main(void)
     TDL_BUTTON_HANDLE button = NULL;
     if (tdl_button_create(BUTTON_NAME, &button_cfg, &button) == OPRT_OK) {
         tdl_button_event_register(button, TDL_BUTTON_PRESS_DOWN, __button_cb);
+        tdl_button_event_register(button, TDL_BUTTON_PRESS_SINGLE_CLICK, __button_cb);
+        tdl_button_event_register(button, TDL_BUTTON_PRESS_DOUBLE_CLICK, __button_cb);
+        tdl_button_event_register(button, TDL_BUTTON_PRESS_REPEAT, __button_cb);
         tdl_button_event_register(button, TDL_BUTTON_LONG_PRESS_START, __button_cb);
     }
 

@@ -33,7 +33,7 @@ export interface OutboxRow {
 
 /** Seconds to wait after the nth failure; after the last one the page is given up on. */
 export const BACKOFF_S = [5, 10, 20, 40, 60];
-/** Free-plan Workers may make 50 subrequests per invocation, and a Tuya page can take three. The next pass starts at once. */
+/** Free-plan Workers may make 50 subrequests per invocation, and a Tuya page can take four. The next pass starts at once. */
 const BATCH = 12;
 const TEST_CLEAR_AFTER_MS = 15_000;
 
@@ -113,8 +113,9 @@ const done = (env: Env, id: number) => env.DB.prepare(`DELETE FROM outbox WHERE 
 
 async function deliverRow(env: Env, row: OutboxRow): Promise<void> {
   if (row.event === "customer") return deliverNotice(env, row);
-  const isTest = row.incident_id.startsWith("test_");
-  const incident = isTest ? testIncident(row.incident_id) : await getIncident(env, row.incident_id);
+  // Rows with no incident behind them: a test page, or word that a paging device has dropped off the network.
+  const isTest = row.incident_id.startsWith("test_") || row.incident_id.startsWith("hw_");
+  const incident = isTest ? syntheticIncident(row.incident_id) : await getIncident(env, row.incident_id);
   // A page that comes due after the incident was acknowledged must not ring the siren again.
   // Nor one held back by a delay that belongs to someone the incident has since left.
   const stale = row.event === "trigger" && (incident?.status !== "triggered" || !incident.assignees.includes(row.user_id));
@@ -153,7 +154,7 @@ async function deliverRow(env: Env, row: OutboxRow): Promise<void> {
   }
 }
 
-function testIncident(id: string): Incident {
+function syntheticIncident(id: string): Incident {
   const t = Date.now();
   return {
     id,
@@ -161,8 +162,8 @@ function testIncident(id: string): Incident {
     service_id: "",
     service_name: "Pager",
     dedup_key: "test",
-    title: "This is a test page",
-    severity: "critical",
+    title: id.startsWith("hw_") ? "A Tuya paging device has gone offline. See Alarm check in Settings." : "This is a test page",
+    severity: id.startsWith("hw_") ? "warning" : "critical",
     status: "triggered",
     source: "pager",
     details: {},

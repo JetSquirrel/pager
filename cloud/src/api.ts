@@ -19,7 +19,7 @@ import {
 import { parseAlertmanager, parseGeneric } from "./ingest";
 import { audienceFor, isEmergency, isLive, mayNotify, sendNotice } from "./notify/customers";
 import { enqueueTest } from "./notify/dispatch";
-import { TUYA_PRESETS, TuyaClient } from "./notify/tuya";
+import { planFromSpec, TUYA_PRESETS, TuyaClient, unsupportedCodes, type TuyaSpec } from "./notify/tuya";
 import { onCallAt, upcomingShifts } from "./oncall";
 import type {
   AlertEvent,
@@ -559,6 +559,37 @@ function validateConfig(type: string, cfg: any): Record<string, unknown> {
   throw new HttpError(400, `type must be one of ${CM_TYPES.join(", ")}`);
 }
 
+/** A Tuya contact method: worked out from the device when asked to, and checked against what the device can really do. */
+async function tuyaConfig(env: AppEnv["Bindings"], raw: any): Promise<Record<string, unknown>> {
+  if (!raw || typeof raw !== "object") throw new HttpError(400, "config is required");
+  const deviceId = need(raw.device_id, "config.device_id") as string;
+  const configured = !!(env.TUYA_CLIENT_ID && env.TUYA_CLIENT_SECRET);
+  const auto = raw.preset === "auto" || (!raw.preset && !raw.on_trigger);
+  if (auto && !configured) throw new HttpError(400, "Tuya is not configured on this server: pick a preset or give the commands");
+
+  let spec: TuyaSpec | null = null;
+  if (configured) {
+    try {
+      spec = await new TuyaClient(env).specification(deviceId);
+    } catch (e) {
+      if (auto) throw new HttpError(502, String(e));
+      console.warn("no Tuya specification, keeping the config unchecked", e);
+    }
+  }
+  let cfg = raw;
+  if (auto) {
+    const plan = spec && planFromSpec(spec);
+    if (!plan) throw new HttpError(400, `this device has nothing to ring or light. It offers: ${spec?.functions.map((f) => f.code).join(", ") || "nothing"}`);
+    cfg = { device_id: deviceId, ...plan };
+  }
+  const out = validateConfig("tuya", cfg) as any;
+  if (spec?.functions.length) {
+    const bad = unsupportedCodes(out, spec);
+    if (bad.length) throw new HttpError(400, `this device has no ${bad.join(", ")}. It offers: ${spec.functions.map((f) => f.code).join(", ")}`);
+  }
+  return out;
+}
+
 function redact(cm: any) {
   const cfg = parseJson<Record<string, unknown>>(cm.config, {});
   for (const k of ["token", "authorization"]) if (cfg[k]) cfg[k] = "••••";
@@ -568,12 +599,12 @@ function redact(cm: any) {
 
 api.get("/contact-methods", async (c) => {
   const { results } = await c.env.DB.prepare(`SELECT * FROM contact_methods WHERE user_id = ? ORDER BY created_at`).bind(c.get("user").id).all();
-  return c.json({ contact_methods: results.map(redact), tuya_presets: Object.keys(TUYA_PRESETS) });
+  return c.json({ contact_methods: results.map(redact), tuya_presets: ["auto", ...Object.keys(TUYA_PRESETS)] });
 });
 
 api.post("/contact-methods", async (c) => {
   const b = await body<{ type: string; label?: string; config: unknown; min_severity?: string; delay_min?: number }>(c);
-  const config = validateConfig(b.type, b.config);
+  const config = b.type === "tuya" ? await tuyaConfig(c.env, b.config) : validateConfig(b.type, b.config);
   const sev = SEVERITIES.includes(b.min_severity as any) ? b.min_severity : "info";
   const id = newId("cm");
   // Turning paging on again on the same browser replaces its old subscription instead of ringing it twice.
@@ -585,6 +616,7 @@ api.post("/contact-methods", async (c) => {
   await c.env.DB.prepare(`INSERT INTO contact_methods (id, user_id, type, label, config, min_severity, delay_min, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(id, c.get("user").id, b.type, b.label ?? "", JSON.stringify(config), sev, delayMin(b.delay_min ?? 0), now())
     .run();
+  if (b.type === "tuya") c.env.wake(); // the first device starts its health checks
   return c.json({ id }, 201);
 });
 

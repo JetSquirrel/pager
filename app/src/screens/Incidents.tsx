@@ -147,7 +147,7 @@ export function Incidents(props: { selected?: string | null; onOpen: (id: string
           <View class={isDesktop ? "" : "flex-1"}>
             <Segmented testID="incident-filter" options={FILTERS} value={filter()} onChange={(v) => filter.set(v)} />
           </View>
-          <View class="flex-1" />
+          {isDesktop && <View class="flex-1" />}
           <IconBtn icon="plus" label="New incident" testID="new-incident" onPress={() => creating.set(true)} />
           <IconBtn icon="refresh" label="Refresh" onPress={() => (filter() === "history" ? history.refetch() : refresh())} />
         </View>

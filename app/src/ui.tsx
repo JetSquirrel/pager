@@ -224,14 +224,15 @@ export function ActionMenu(props: { trigger: JSX.Element; items: MenuAction[] })
 }
 
 /** One choice among a few short options. Stretches on touch screens, hugs its labels with a pointer. */
-export function Segmented<T extends string>(props: { options: { value: T; label: string }[]; value: T; onChange: (value: T) => void; testID?: string }) {
+export function Segmented<T extends string>(props: { options: { value: T; label: string }[]; value: T; onChange: (value: T) => void; testID?: string; hug?: boolean }) {
+  const hug = () => isDesktop || props.hug;
   return (
-    <Tabs testID={props.testID} class={`flex-row gap-0.5 rounded-(--radius) bg-muted p-0.5 ${isDesktop ? "self-start" : ""}`}>
+    <Tabs testID={props.testID} class={`flex-row gap-0.5 rounded-(--radius) bg-muted p-0.5 ${hug() ? "self-start" : ""}`}>
       {props.options.map((o) => (
         <Tab
           selected={props.value === o.value}
           onPress={() => props.onChange(o.value)}
-          class={`group items-center justify-center rounded-md hover:bg-accent selected:bg-card ${isDesktop ? "min-h-7 px-3" : "min-h-10 flex-1 px-1"} ${FOCUS}`}
+          class={`group items-center justify-center rounded-md hover:bg-accent selected:bg-card ${isDesktop ? "min-h-7 px-3" : props.hug ? "min-h-10 px-3" : "min-h-10 flex-1 px-1"} ${FOCUS}`}
         >
           <Text class="text-sm font-medium text-muted-foreground group-selected:text-foreground" numberOfLines={1}>
             {o.label}

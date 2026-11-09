@@ -1,6 +1,6 @@
 // Admin: set up who gets paged for what — users, rotations, escalation policies and services
 // (with the URLs monitoring tools send alerts to).
-import { Clipboard, resource, signal, Text, View } from "nsh";
+import { Clipboard, resource, Scroll, signal, Text, View } from "nsh";
 import { Input, Switch } from "nsh/base";
 import type { Customer, CustomerChannel, Policy, PolicyTarget, ScheduleDef, Service, User } from "../api";
 import { api } from "../store";
@@ -441,9 +441,10 @@ export function Admin() {
         <If when={usage() && usage()!.pressure !== "ok"}>
           <Callout tone="critical" title="Free plan running out today: repeats and receipts are no longer recorded." />
         </If>
-        <View class={isDesktop ? "" : "-mx-1"}>
+        {/* Six sections do not fit across a phone: they scroll instead of being cut short. */}
+        <If when={isDesktop} else={<Scroll horizontal scrollbar={false}><Segmented hug options={TABS} value={tab()} onChange={(v) => tab.set(v)} testID="admin-tabs" /></Scroll>}>
           <Segmented options={TABS} value={tab()} onChange={(v) => tab.set(v)} testID="admin-tabs" />
-        </View>
+        </If>
         <If when={data()} else={data.error() ? <Failed error={data.error()} onRetry={reload} /> : <Loading />}>
           {(d) => (
             <>

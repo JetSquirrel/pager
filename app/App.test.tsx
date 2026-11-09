@@ -409,6 +409,51 @@ test("the alarm check says what would stop a page", async () => {
   await app.waitFor("id:alarm-browser >> This browser blocks alarms: allow notifications for this site");
 });
 
+test("picks a Tuya device from the list, and adds it on Auto", async () => {
+  const added: unknown[] = [];
+  const app = await open("App.tsx", {
+    storage: signedIn,
+    network: api({
+      [`GET ${SERVER}/v1/contact-methods`]: { body: { contact_methods: [], tuya_presets: ["auto", "siren"] } },
+      [`GET ${SERVER}/v1/devices`]: { body: { devices: [] } },
+      [`GET ${SERVER}/v1/tuya/devices`]: { body: { configured: true, devices: [{ id: "d1", name: "Desk siren", category: "sgbj", online: true, suggested_preset: "siren" }, { id: "d2", name: "Lobby", category: "dj", online: false, suggested_preset: "light" }] } },
+      [`POST ${SERVER}/v1/contact-methods`]: (req: { body: string }) => {
+        added.push(JSON.parse(req.body));
+        return { status: 201, body: { id: "cm_1" } };
+      },
+    }),
+  });
+  await app.press("Settings");
+  await app.waitFor("How you get paged");
+  await app.press("id:add-method");
+  await app.press("Tuya");
+  await app.waitFor("Lobby (offline)");
+  await app.press("id:tuya-devices >> Desk siren");
+  await app.press("id:save-method");
+  await app.waitFor("Critical pages reach nothing while the app is closed");
+  expect(added).toEqual([{ type: "tuya", label: "Desk siren", config: { device_id: "d1", preset: "auto" } }]);
+});
+
+test("registers a hardware pager and shows its token once", async () => {
+  const boards: unknown[] = [];
+  const app = await open("App.tsx", {
+    storage: signedIn,
+    network: api({
+      [`GET ${SERVER}/v1/contact-methods`]: { body: { contact_methods: [], tuya_presets: [] } },
+      [`GET ${SERVER}/v1/devices`]: () => ({ body: { devices: boards } }),
+      [`POST ${SERVER}/v1/devices`]: () => {
+        boards.push({ id: "dev_1", name: "T5AI pager", last_seen_at: null, firmware: null });
+        return { status: 201, body: { id: "dev_1", token: "dev_abc" } };
+      },
+    }),
+  });
+  await app.press("Settings");
+  await app.waitFor("Hardware pagers");
+  await app.press("id:add-board");
+  await app.waitFor("dev_abc");
+  await app.waitFor("Never connected");
+});
+
 test("takes over a shift from the menu", async () => {
   const posts: unknown[] = [];
   const app = await open("App.tsx", {

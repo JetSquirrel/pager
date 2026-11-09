@@ -130,7 +130,8 @@ export function IncidentDetail(props: { id: string }) {
             </View>
 
             <If when={d().incident.status !== "resolved"}>
-              <View class="flex-row flex-wrap gap-2">
+              <View class={isDesktop ? "flex-row flex-wrap gap-2" : "gap-2"}>
+                <View class="flex-row gap-2">
                 {d().incident.status === "triggered" && (
                   <Btn title="Acknowledge" grow={!isDesktop} busy={busy() === "ack"} disabled={!!busy()} onPress={() => run("ack", () => api().acknowledge(props.id))} />
                 )}
@@ -142,6 +143,8 @@ export function IncidentDetail(props: { id: string }) {
                   disabled={!!busy()}
                   onPress={() => run("resolve", () => api().resolve(props.id))}
                 />
+                </View>
+                <View class="flex-row items-center gap-2">
                 {d().incident.status === "triggered" && (
                   <Btn title="Page again" variant="ghost" busy={busy() === "repage"} disabled={!!busy()} onPress={() => run("repage", () => api().repage(props.id))} />
                 )}
@@ -160,6 +163,7 @@ export function IncidentDetail(props: { id: string }) {
                       : []),
                   ]}
                 />
+                </View>
               </View>
             </If>
 

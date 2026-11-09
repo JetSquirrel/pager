@@ -25,11 +25,12 @@ const verb: Record<NotifyEvent, string> = {
   acknowledge: "Acknowledged",
   resolve: "Resolved",
   reassign: "Reassigned",
+  notice: "Notice",
   test: "Test page",
 };
 
 export function headline(incident: Incident, event: NotifyEvent): string {
-  return `[${verb[event]}] #${incident.number} ${incident.title}`;
+  return `[${verb[event]}] ${incident.number ? `#${incident.number} ` : ""}${incident.title}`;
 }
 
 /** A hung endpoint must not hold up the other pages in this pass. */
@@ -78,7 +79,7 @@ export async function sendWebhook(env: Env, cfg: WebhookConfig, incident: Incide
       links: {
         incident: `${env.PUBLIC_URL}/app/#/incidents/${incident.id}`,
         acknowledge: event === "trigger" ? await actionUrl(env, incident.id, userId, "ack") : undefined,
-        resolve: event !== "resolve" ? await actionUrl(env, incident.id, userId, "resolve") : undefined,
+        resolve: event !== "resolve" && event !== "notice" ? await actionUrl(env, incident.id, userId, "resolve") : undefined,
       },
     }),
     signal: timeout(),

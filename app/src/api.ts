@@ -110,6 +110,21 @@ export interface Customer {
   enabled: boolean;
 }
 
+export interface TuyaDevice {
+  id: string;
+  name: string;
+  category: string;
+  online: boolean;
+  suggested_preset: string | null;
+}
+
+export interface HardwarePager {
+  id: string;
+  name: string;
+  last_seen_at: number | null;
+  firmware: string | null;
+}
+
 export interface CustomerNotice {
   id: string;
   message: string;
@@ -185,6 +200,11 @@ export class Api {
     this.call<{ ok: true }>("PATCH", `/contact-methods/${id}`, patch);
   deleteContactMethod = (id: string) => this.call<void>("DELETE", `/contact-methods/${id}`);
   testContactMethod = (id: string) => this.call<{ ok: true }>("POST", `/contact-methods/${id}/test`);
+
+  tuyaDevices = () => this.call<{ configured: boolean; devices: TuyaDevice[] }>("GET", "/tuya/devices");
+  hardwarePagers = () => this.call<{ devices: HardwarePager[] }>("GET", "/devices");
+  addHardwarePager = (name: string) => this.call<{ id: string; token: string }>("POST", "/devices", { name });
+  deleteHardwarePager = (id: string) => this.call<void>("DELETE", `/devices/${id}`);
 
   pushKey = () => this.call<{ publicKey: string }>("GET", "/push/vapid");
 

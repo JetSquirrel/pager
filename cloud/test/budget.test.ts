@@ -16,8 +16,9 @@ let h: Harness;
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"], now: Date.parse("2026-11-09T00:00:00Z") });
-  vi.stubGlobal("fetch", async () => new Response("{}", { status: 200 }));
-  h = makeHarness();
+  // Shaped to answer Tuya as well as the webhooks, so the day includes a siren and its health checks.
+  vi.stubGlobal("fetch", async () => Response.json({ success: true, result: { online: true, access_token: "t", expire_time: 7200 } }));
+  h = makeHarness({ TUYA_CLIENT_ID: "id", TUYA_CLIENT_SECRET: "secret" });
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -27,7 +28,9 @@ afterEach(() => {
 async function simulateDay() {
   const { T, B, key } = await seed(h);
   for (const [token, name] of [[T, "alice"], [B, "bob"]]) {
-    for (const i of [1, 2]) await h.call("POST", "/v1/contact-methods", { token, body: { type: "webhook", label: `${name}${i}`, config: { url: `https://${name}${i}.test/` } } });
+    await h.call("POST", "/v1/contact-methods", { token, body: { type: "webhook", label: `${name}1`, config: { url: `https://${name}1.test/` } } });
+    const second = name === "alice" ? { type: "tuya", label: "Siren", config: { device_id: "d1", preset: "siren" } } : { type: "webhook", label: "bob2", config: { url: "https://bob2.test/" } };
+    await h.call("POST", "/v1/contact-methods", { token, body: second });
   }
   const device = (await h.call("POST", "/v1/devices", { token: T, body: { name: "Desk" } })).json.token as string;
   const start = Date.now();
