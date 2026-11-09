@@ -97,10 +97,12 @@ the other port carries the chip's log at 460800. The board has 2.4 GHz Wi-Fi onl
 
 ### Checking the speaker
 
-`pager_audio` on the serial console rings for about 3 seconds and answers whether the microphone heard it. It listens to
-the room, to the siren at volume zero, then to the siren at full volume. The answer is `yes`, `NO`, or `unclear` when the
-room is too loud to tell. Echo cancellation removes most of the siren, so only the peak level is compared, and a reading
-says the speaker made sound, not how loud it is across the room. It refuses to run while a page is ringing.
+`pager_audio` on the serial console plays a 1 kHz tone for about 4 seconds and answers whether the microphone heard it.
+It listens to the room, to the tone with the amplifier off, then to the tone with the amplifier on (GPIO39 high), and
+measures only 1 kHz, so room noise at other pitches does not count. The firmware opens the codec without echo
+cancellation, which would remove the tone and, through its voice detector, stop the microphone data altogether. The
+answer is `yes` or `NO` with the reason; `NO` needs the microphone within reach of the speaker to mean anything. A
+reading says the speaker made sound, not how loud it is across the room. It refuses to run while a page is ringing.
 
 ### Reaching the server
 

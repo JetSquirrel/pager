@@ -28,12 +28,14 @@
 #include "netmgr.h"
 #include "tal_api.h"
 #include "tal_cli.h"
+#include "tkl_gpio.h"
 #include "tkl_output.h"
 #if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
 #include "netconn_wifi.h"
 #endif
 
 #include "board_com_api.h"
+#include "tdd_audio.h"
 #include "tdl_audio_manage.h"
 #include "tdl_button_manage.h"
 #include "tdl_led_manage.h"
@@ -55,6 +57,10 @@
 #define BACKOFF_MAX_MS    30000
 #define SAMPLE_RATE       16000
 #define SIREN_VOLUME      80
+#define PAGER_AUDIO_NAME  "pager_audio"
+#define SPK_EN_PIN        TUYA_GPIO_NUM_39 // amplifier enable on the T5AI-Core: high = on
+#define TEST_TONE_HZ      1000
+#define GOERTZEL_COEFF    1.847759f // 2*cos(2*pi*1000/16000), for TEST_TONE_HZ at SAMPLE_RATE
 #define SNOOZE_PATH       "/v1/device/snooze?minutes=30"
 #define OFFLINE_CHIRP_AFTER_MS (5 * 60 * 1000)
 #define OFFLINE_CHIRP_EVERY_MS (60 * 1000)
@@ -106,8 +112,9 @@ static volatile bool sg_net_up = false;
 static volatile bool sg_test_ring = false;
 static volatile bool sg_snooze_wanted = false; // the next post of sg_ack_sem means snooze, not acknowledge
 static volatile bool sg_mic_open = false;      // __mic_cb is adding up a measurement
-static uint64_t sg_mic_sum;
-static uint32_t sg_mic_peak, sg_mic_samples;
+static volatile uint32_t sg_test_tone = 0;    // the alarm thread plays this frequency while it is non-zero
+static uint64_t sg_mic_tone;
+static uint32_t sg_mic_peak, sg_mic_frames;
 static volatile uint32_t sg_play_errors = 0;
 
 static TDL_LED_HANDLE_T sg_led;
@@ -400,7 +407,7 @@ static void __play(uint32_t freq, uint32_t ms, int16_t amp)
     }
 }
 
-/** Adds up how loud the microphone is, only while a measurement is open. Runs on the codec's own thread. */
+/** Measures the test tone in each microphone frame (Goertzel), so room noise at other pitches does not count. */
 static void __mic_cb(TDL_AUDIO_FRAME_FORMAT_E type, TDL_AUDIO_STATUS_E status, uint8_t *data, uint32_t len)
 {
     (void)type;
@@ -408,26 +415,58 @@ static void __mic_cb(TDL_AUDIO_FRAME_FORMAT_E type, TDL_AUDIO_STATUS_E status, u
     if (!sg_mic_open || !data || len < 2) return;
     const int16_t *s = (const int16_t *)data;
     uint32_t n = len / 2;
+    float q1 = 0, q2 = 0;
     for (uint32_t i = 0; i < n; i++) {
-        int32_t a = s[i] < 0 ? -(int32_t)s[i] : s[i];
-        sg_mic_sum += (uint32_t)a;
-        if ((uint32_t)a > sg_mic_peak) sg_mic_peak = (uint32_t)a;
+        float q0 = GOERTZEL_COEFF * q1 - q2 + s[i];
+        q2 = q1;
+        q1 = q0;
+        uint32_t a = s[i] < 0 ? (uint32_t)(-(int32_t)s[i]) : (uint32_t)s[i];
+        if (a > sg_mic_peak) sg_mic_peak = a;
     }
-    sg_mic_samples += n;
+    float power = q1 * q1 + q2 * q2 - GOERTZEL_COEFF * q1 * q2;
+    sg_mic_tone += (uint64_t)(4.0f * power / ((float)n * (float)n));
+    sg_mic_frames++;
 }
 
-/** Listens for `ms` and returns the mean level and peak (0..32768) and the number of samples that arrived. */
-static uint32_t __mic_listen(uint32_t ms, uint32_t *mean, uint32_t *peak)
+static uint32_t __isqrt(uint64_t v)
 {
+    uint64_t r = 0, bit = 1ULL << 62;
+    while (bit > v) bit >>= 2;
+    while (bit) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (uint32_t)r;
+}
+
+typedef struct {
+    uint32_t tone;   // amplitude of the test tone the microphone heard, 0..32768
+    uint32_t peak;   // loudest sample
+    uint32_t frames; // 0 means the microphone delivered nothing
+} MIC_READING_T;
+
+/** Sets the amplifier and the test tone, lets them settle, and listens for `ms`. */
+static MIC_READING_T __mic_measure(bool amp_on, uint32_t tone_hz, uint32_t ms)
+{
+    MIC_READING_T r;
+    tkl_gpio_write(SPK_EN_PIN, amp_on ? TUYA_GPIO_LEVEL_HIGH : TUYA_GPIO_LEVEL_LOW);
+    sg_test_tone = tone_hz;
+    tal_system_sleep(300);
     sg_mic_open = false;
-    sg_mic_sum = 0;
-    sg_mic_peak = sg_mic_samples = 0;
+    sg_mic_tone = 0;
+    sg_mic_peak = sg_mic_frames = 0;
     sg_mic_open = true;
     tal_system_sleep(ms);
     sg_mic_open = false;
-    *mean = sg_mic_samples ? (uint32_t)(sg_mic_sum / sg_mic_samples) : 0;
-    *peak = sg_mic_peak;
-    return sg_mic_samples;
+    r.frames = sg_mic_frames;
+    r.peak = sg_mic_peak;
+    r.tone = sg_mic_frames ? __isqrt(sg_mic_tone / sg_mic_frames) : 0;
+    return r;
 }
 
 /** Drives the LED and the siren from the current state. */
@@ -438,7 +477,7 @@ static void __alarm_task(void *arg)
     (void)arg;
     for (;;) {
         tal_mutex_lock(sg_mutex);
-        bool ring = (sg_st.alert && !sg_st.muted) || sg_test_ring;
+        bool ring = (sg_st.alert && !sg_st.muted) || sg_test_ring || sg_test_tone;
         bool critical = strcmp(sg_st.severity, "critical") == 0 || sg_test_ring;
         int mode = ring ? 3 : sg_st.alert ? 2 : sg_st.link != LINK_ONLINE ? 1 : sg_st.acked ? 2 : 0;
         tal_mutex_unlock(sg_mutex);
@@ -460,7 +499,9 @@ static void __alarm_task(void *arg)
             }
         }
 
-        if (ring) {
+        if (sg_test_tone) {
+            __play(sg_test_tone, 200, 24000);
+        } else if (ring) {
             if (critical) {
                 /* Two-tone siren. */
                 __play(960, 400, 24000);
@@ -620,8 +661,7 @@ static void __cmd_test(int argc, char *argv[])
 
 static void __cmd_audio(int argc, char *argv[])
 {
-    char buf[260];
-    uint32_t quiet, quiet_peak, muted, muted_peak, loud, loud_peak;
+    char buf[360];
     (void)argc;
     (void)argv;
     if (!sg_audio) {
@@ -633,23 +673,22 @@ static void __cmd_audio(int argc, char *argv[])
         return;
     }
     uint32_t errors = sg_play_errors;
-    uint32_t got_quiet = __mic_listen(1000, &quiet, &quiet_peak);
-    /* The same siren with the volume at zero is the control: only what changes when the volume comes up is the speaker. */
-    tdl_audio_volume_set(sg_audio, 0);
-    sg_test_ring = true;
-    tal_system_sleep(300);
-    uint32_t got_muted = __mic_listen(1500, &muted, &muted_peak);
-    tdl_audio_volume_set(sg_audio, SIREN_VOLUME);
-    tal_system_sleep(300);
-    uint32_t got_loud = __mic_listen(1500, &loud, &loud_peak);
-    sg_test_ring = false;
-    /* Echo cancellation removes most of the siren, so the peak is what survives. A loud room hides it: say so, don't call the speaker dead. */
-    uint32_t floor_peak = quiet_peak > muted_peak ? quiet_peak : muted_peak;
-    const char *verdict = !got_loud ? "NO (microphone gave no data)" : loud_peak >= 2 * floor_peak ? "yes" : floor_peak > 200 ? "unclear (room too loud, try again)" : "NO";
+    /* The amplifier-off reading is the control: a tone heard with it off leaked inside the chip, not through the air. */
+    MIC_READING_T room = __mic_measure(true, 0, 1000);
+    MIC_READING_T off = __mic_measure(false, TEST_TONE_HZ, 1500);
+    MIC_READING_T on = __mic_measure(true, TEST_TONE_HZ, 1500);
+    sg_test_tone = 0;
+    tkl_gpio_write(SPK_EN_PIN, TUYA_GPIO_LEVEL_HIGH);
+
+    uint32_t floor_tone = room.tone > off.tone ? room.tone : off.tone;
+    const char *verdict = !on.frames                      ? "NO (microphone gave no data)"
+                          : on.tone >= 3 * floor_tone + 20 ? "yes"
+                          : off.tone >= 3 * room.tone + 20 ? "NO (tone only leaks inside the chip; amplifier or speaker silent)"
+                                                           : "NO (nothing heard)";
     snprintf(buf, sizeof(buf),
-             "mic quiet: mean %u peak %u (%u samples)\r\nmic muted: mean %u peak %u (%u samples)\r\n"
-             "mic siren: mean %u peak %u (%u samples)\r\nplay errors: %u\r\nspeaker heard: %s\r\n",
-             quiet, quiet_peak, got_quiet, muted, muted_peak, got_muted, loud, loud_peak, got_loud,
+             "room:        tone %u peak %u (%u frames)\r\namp off+tone: tone %u peak %u (%u frames)\r\n"
+             "amp on+tone:  tone %u peak %u (%u frames)\r\nplay errors: %u\r\nspeaker heard: %s\r\n",
+             room.tone, room.peak, room.frames, off.tone, off.peak, off.frames, on.tone, on.peak, on.frames,
              sg_play_errors - errors, verdict);
     tal_cli_echo(buf);
 }
@@ -726,7 +765,18 @@ static void user_main(void)
     }
 
 #if defined(AUDIO_CODEC_NAME)
-    if (tdl_audio_find(AUDIO_CODEC_NAME, &sg_audio) == OPRT_OK && tdl_audio_open(sg_audio, __mic_cb) == OPRT_OK) {
+    /* The board's own registration turns echo cancellation on, which is for talking and removes the very siren
+       pager_audio listens for. A pager never talks, so open the codec without it. */
+    TDD_AUDIO_T5AI_T audio_cfg = {.aec_enable = 0,
+                                  .ai_chn = TKL_AI_0,
+                                  .sample_rate = TKL_AUDIO_SAMPLE_16K,
+                                  .data_bits = TKL_AUDIO_DATABITS_16,
+                                  .channel = TKL_AUDIO_CHANNEL_MONO,
+                                  .spk_sample_rate = TKL_AUDIO_SAMPLE_16K,
+                                  .spk_pin = SPK_EN_PIN,
+                                  .spk_pin_polarity = TUYA_GPIO_LEVEL_LOW};
+    if (tdd_audio_register(PAGER_AUDIO_NAME, audio_cfg) == OPRT_OK && tdl_audio_find(PAGER_AUDIO_NAME, &sg_audio) == OPRT_OK &&
+        tdl_audio_open(sg_audio, __mic_cb) == OPRT_OK) {
         tdl_audio_get_info(sg_audio, &sg_audio_info);
         tdl_audio_volume_set(sg_audio, SIREN_VOLUME);
         PR_NOTICE("audio: frame %u bytes, %u ms", sg_audio_info.frame_size, sg_audio_info.sample_tm_ms);
