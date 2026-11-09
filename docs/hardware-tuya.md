@@ -95,7 +95,16 @@ board chirps once a minute; `pager_clear` on the serial console forgets the serv
 The settings console is the board's user UART at 115200 baud (the lower-numbered of its two USB ports on the T5AI-Core);
 the other port carries the chip's log at 460800. The board has 2.4 GHz Wi-Fi only.
 
+### Checking the speaker
+
+`pager_audio` on the serial console rings for about 3 seconds and answers whether the microphone heard it. It listens to
+the room, to the siren at volume zero, then to the siren at full volume. The answer is `yes`, `NO`, or `unclear` when the
+room is too loud to tell. Echo cancellation removes most of the siren, so only the peak level is compared, and a reading
+says the speaker made sound, not how loud it is across the room. It refuses to run while a page is ringing.
+
 ### Reaching the server
 
 The board resolves the server's name through the local network's DNS and has no proxy support, so it needs a hostname
-that network can really reach. `*.workers.dev` is poisoned on mainland China networks: use a custom domain there.
+that network can really reach. `*.workers.dev` is poisoned on mainland China networks: use a custom domain there. The
+production pager is `https://pager.jetsquirrel.cloud`; `workers_dev` stays on so clients saved with the old address keep
+working.

@@ -12,6 +12,7 @@
  *   pager_url  http://192.168.1.20:8787  |  https://pager.example.com
  *   pager_token dev_xxxxxxxx
  *   pager_show       pager_test       pager_reboot
+ *   pager_audio      ring for 2 s and report what the microphone heard
  *   pager_clear      forget the server and token; the board goes quiet until it is set up again
  *
  * LED: off = all clear · solid = acknowledged incidents still open · fast blink = PAGING ·
@@ -104,6 +105,10 @@ static SEM_HANDLE sg_wake_sem; // nudges the poller (new config, ack done)
 static volatile bool sg_net_up = false;
 static volatile bool sg_test_ring = false;
 static volatile bool sg_snooze_wanted = false; // the next post of sg_ack_sem means snooze, not acknowledge
+static volatile bool sg_mic_open = false;      // __mic_cb is adding up a measurement
+static uint64_t sg_mic_sum;
+static uint32_t sg_mic_peak, sg_mic_samples;
+static volatile uint32_t sg_play_errors = 0;
 
 static TDL_LED_HANDLE_T sg_led;
 static TDL_AUDIO_HANDLE_T sg_audio;
@@ -391,17 +396,38 @@ static void __play(uint32_t freq, uint32_t ms, int16_t amp)
         } else {
             memset(frame, 0, frame_bytes);
         }
-        tdl_audio_play(sg_audio, (uint8_t *)frame, frame_bytes);
+        if (tdl_audio_play(sg_audio, (uint8_t *)frame, frame_bytes) != OPRT_OK) sg_play_errors++;
     }
 }
 
-/** The codec also records; the pager has no use for the microphone. */
+/** Adds up how loud the microphone is, only while a measurement is open. Runs on the codec's own thread. */
 static void __mic_cb(TDL_AUDIO_FRAME_FORMAT_E type, TDL_AUDIO_STATUS_E status, uint8_t *data, uint32_t len)
 {
     (void)type;
     (void)status;
-    (void)data;
-    (void)len;
+    if (!sg_mic_open || !data || len < 2) return;
+    const int16_t *s = (const int16_t *)data;
+    uint32_t n = len / 2;
+    for (uint32_t i = 0; i < n; i++) {
+        int32_t a = s[i] < 0 ? -(int32_t)s[i] : s[i];
+        sg_mic_sum += (uint32_t)a;
+        if ((uint32_t)a > sg_mic_peak) sg_mic_peak = (uint32_t)a;
+    }
+    sg_mic_samples += n;
+}
+
+/** Listens for `ms` and returns the mean level and peak (0..32768) and the number of samples that arrived. */
+static uint32_t __mic_listen(uint32_t ms, uint32_t *mean, uint32_t *peak)
+{
+    sg_mic_open = false;
+    sg_mic_sum = 0;
+    sg_mic_peak = sg_mic_samples = 0;
+    sg_mic_open = true;
+    tal_system_sleep(ms);
+    sg_mic_open = false;
+    *mean = sg_mic_samples ? (uint32_t)(sg_mic_sum / sg_mic_samples) : 0;
+    *peak = sg_mic_peak;
+    return sg_mic_samples;
 }
 
 /** Drives the LED and the siren from the current state. */
@@ -592,6 +618,42 @@ static void __cmd_test(int argc, char *argv[])
     sg_test_ring = false;
 }
 
+static void __cmd_audio(int argc, char *argv[])
+{
+    char buf[260];
+    uint32_t quiet, quiet_peak, muted, muted_peak, loud, loud_peak;
+    (void)argc;
+    (void)argv;
+    if (!sg_audio) {
+        tal_cli_echo("no audio codec\r\n");
+        return;
+    }
+    if (sg_st.alert) {
+        tal_cli_echo("a page is ringing: try again when it is clear\r\n");
+        return;
+    }
+    uint32_t errors = sg_play_errors;
+    uint32_t got_quiet = __mic_listen(1000, &quiet, &quiet_peak);
+    /* The same siren with the volume at zero is the control: only what changes when the volume comes up is the speaker. */
+    tdl_audio_volume_set(sg_audio, 0);
+    sg_test_ring = true;
+    tal_system_sleep(300);
+    uint32_t got_muted = __mic_listen(1500, &muted, &muted_peak);
+    tdl_audio_volume_set(sg_audio, SIREN_VOLUME);
+    tal_system_sleep(300);
+    uint32_t got_loud = __mic_listen(1500, &loud, &loud_peak);
+    sg_test_ring = false;
+    /* Echo cancellation removes most of the siren, so the peak is what survives. A loud room hides it: say so, don't call the speaker dead. */
+    uint32_t floor_peak = quiet_peak > muted_peak ? quiet_peak : muted_peak;
+    const char *verdict = !got_loud ? "NO (microphone gave no data)" : loud_peak >= 2 * floor_peak ? "yes" : floor_peak > 200 ? "unclear (room too loud, try again)" : "NO";
+    snprintf(buf, sizeof(buf),
+             "mic quiet: mean %u peak %u (%u samples)\r\nmic muted: mean %u peak %u (%u samples)\r\n"
+             "mic siren: mean %u peak %u (%u samples)\r\nplay errors: %u\r\nspeaker heard: %s\r\n",
+             quiet, quiet_peak, got_quiet, muted, muted_peak, got_muted, loud, loud_peak, got_loud,
+             sg_play_errors - errors, verdict);
+    tal_cli_echo(buf);
+}
+
 static void __cmd_reboot(int argc, char *argv[])
 {
     (void)argc;
@@ -606,6 +668,7 @@ static const cli_cmd_t sg_cmds[] = {
     {.name = "pager_clear", .help = "forget the server and token", .func = __cmd_clear},
     {.name = "pager_show", .help = "show settings and state", .func = __cmd_show},
     {.name = "pager_test", .help = "ring for 5 seconds", .func = __cmd_test},
+    {.name = "pager_audio", .help = "ring for 2 seconds and report what the microphone heard", .func = __cmd_audio},
     {.name = "pager_reboot", .help = "reboot", .func = __cmd_reboot},
 };
 
