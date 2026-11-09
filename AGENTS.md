@@ -14,6 +14,10 @@ Everything lives in the one `Pager` Durable Object. Anything that must happen la
 
 Secrets the pager generates for itself (action-link secret, VAPID keys) stay in the database. A deploy must never replace them: that would cut off every subscribed device.
 
+## UI
+
+Follow https://nsh.dev/zh-CN/docs/design-guides/. Colors come from `app/theme.json` (light and dark) by name, never hex in a screen; shared controls live in `app/src/ui.tsx`. Touch targets are at least 44 pt. State is never color alone. Commands are buttons or menus, not styled text.
+
 ## Checks
 
 ```sh

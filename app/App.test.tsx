@@ -44,7 +44,7 @@ test("signs in and shows the open incidents", async () => {
   await app.press("Sign in");
   await app.waitFor("Disk 95% on db1");
   expect(app.shows("2 alerts")).toBe(true);
-  expect(app.shows("Incidents (1)")).toBe(true);
+  expect(app.shows("id:triggered-count >> 1")).toBe(true);
   // The session is kept for the next start.
   expect(JSON.parse(app.storage()["pager.session"])).toEqual({ server: SERVER, token: "tok" });
 });
@@ -56,7 +56,8 @@ test("restores the session and acknowledges from the list", async () => {
   });
   await app.waitFor("Disk 95% on db1");
   await app.press("Acknowledge");
-  await app.waitFor("ACKNOWLEDGED (1)");
+  await app.waitFor("Resolve");
+  expect(app.shows("Acknowledged")).toBe(true);
   expect(app.shows("All quiet")).toBe(true);
   const ack = app.requests().find((r) => r.method === "POST");
   expect(ack?.url).toBe(`${SERVER}/v1/incidents/inc_1/acknowledge`);
@@ -102,11 +103,11 @@ test("opens an incident: timeline, escalation, acknowledge", async () => {
     }),
   });
   await app.press("Disk 95% on db1");
-  await app.waitFor("Paged: Alice");
+  await app.waitFor("id:paged >> Alice");
   expect(app.shows("Step 1")).toBe(true);
   await app.press("Acknowledge");
-  await app.waitFor("Escalation stopped");
-  await app.waitFor("Acknowledged   Alice");
+  await app.waitFor("id:escalation >> Stopped");
+  await app.waitFor("Acknowledged");
 });
 
 test("admin sets up a rotation, a policy and a service", async () => {
@@ -139,6 +140,8 @@ test("admin sets up a rotation, a policy and a service", async () => {
     }),
   });
   await app.press("Admin");
+  await app.press("Rotations");
+  await app.press("New rotation");
   await app.waitFor("Create rotation");
 
   await app.type("id:schedule-name", "Primary");
@@ -149,16 +152,21 @@ test("admin sets up a rotation, a policy and a service", async () => {
   await app.waitFor("Bob → Alice");
   expect(posted[0]).toEqual({ name: "Primary", rotation: { shift_hours: 24, users: ["usr_2", "usr_1"] } });
 
+  await app.press("Policies");
+  await app.press("New policy");
   await app.type("id:policy-name", "Default");
-  await app.press("id:policy-first >> 🗓 Primary");
+  await app.press("id:policy-first >> Primary");
   await app.press("Create policy");
   await app.waitFor("At once: on call in Primary");
   expect(posted[1]).toEqual({ name: "Default", repeat: 2, steps: [{ delay_min: 0, targets: [{ type: "schedule", id: "sch_1" }] }] });
 
+  await app.press("Services");
+  await app.press("New service");
   await app.type("id:service-name", "Checkout");
   await app.press("id:service-policy >> Default");
   await app.press("Create service");
-  await app.press("Copy Alertmanager URL");
+  await app.press("Copy URL");
+  await app.press("Alertmanager");
   expect(app.clipboard()).toBe(`${SERVER}/v1/integrations/key_1/alertmanager`);
 });
 
@@ -198,4 +206,51 @@ test("turns on paging for this browser from Settings", async () => {
   await app.waitFor("Android Chrome");
   expect(added).toEqual([{ type: "webpush", label: "Android Chrome", config: { endpoint: sub.endpoint, keys: sub.keys } }]);
   expect(app.shows("Page me on this device")).toBe(false);
+});
+
+test("a wide window shows the list and the incident side by side", async () => {
+  const detail = {
+    body: {
+      incident: incident(),
+      events: [{ id: 1, at: Date.now() - 60_000, kind: "triggered", actor: null, actor_name: null, message: "Disk 95% on db1" }],
+      escalation: { step: 0, nextAt: Date.now() + 9 * 60_000, stopped: false },
+      assignees: [{ id: "usr_1", name: "Alice", email: "alice@example.com" }],
+    },
+  };
+  for (const colorScheme of ["light", "dark"] as const) {
+    const app = await open("App.tsx", {
+      width: 1280,
+      height: 800,
+      platform: "web",
+      colorScheme,
+      storage: signedIn,
+      network: api({ [`GET ${SERVER}/v1/incidents/inc_1`]: detail }),
+    });
+    // The first open incident is shown without a press, and the sidebar names the sections.
+    await app.waitFor("id:paged >> Alice");
+    expect(app.shows("id:triggered-count >> 1")).toBe(true);
+    expect(app.shows("On call")).toBe(true);
+  }
+});
+
+test("takes over a shift from the menu", async () => {
+  const posts: unknown[] = [];
+  const app = await open("App.tsx", {
+    storage: signedIn,
+    network: api({
+      [`GET ${SERVER}/v1/oncall`]: {
+        body: { schedules: [{ id: "sch_1", name: "Primary", current: { user_id: "usr_2", user: { id: "usr_2", name: "Bob" }, starts_at: Date.now() - 1000, ends_at: Date.now() + 7_200_000, override: false }, next: [] }] },
+      },
+      [`POST ${SERVER}/v1/schedules/sch_1/overrides`]: (req: { body: string }) => {
+        posts.push(JSON.parse(req.body));
+        return { status: 201, body: {} };
+      },
+    }),
+  });
+  await app.press("On call");
+  await app.waitFor("Bob");
+  await app.press("Take over");
+  await app.press("For 1 hour");
+  await app.waitFor("You are on call for Primary");
+  expect(posts.length).toBe(1);
 });

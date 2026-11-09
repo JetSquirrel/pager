@@ -1,15 +1,31 @@
 import { Scroll, signal, Text, View } from "nsh";
 import type { Incident } from "../api";
-import { acknowledged, api, connection, lastError, refresh, triggered, upsert } from "../store";
+import { acknowledged, api, connection, incidents, lastError, refresh, triggered, upsert } from "../store";
 import { toast } from "../toast";
-import { Btn, Card, Empty, isDesktop, Pill, SectionTitle, SEV_COLOR, STATUS_COLOR, timeAgo } from "../ui";
+import { Btn, Callout, Dot, Empty, IconBtn, isDesktop, Meta, Section, SeverityMark, Surface, Row, timeAgo, type Tone } from "../ui";
 
-export function IncidentRow(props: { incident: () => Incident; onOpen: (id: string) => void }) {
+const LIVE: Record<"live" | "connecting" | "offline", { label: string; tone: Tone }> = {
+  live: { label: "Live", tone: "ok" },
+  connecting: { label: "Connecting…", tone: "warning" },
+  offline: { label: "Offline, retrying", tone: "neutral" },
+};
+
+export function LiveStatus() {
+  return (
+    <View class="flex-row items-center gap-1.5">
+      <Dot tone={LIVE[connection()].tone} />
+      <Meta>{LIVE[connection()].label}</Meta>
+    </View>
+  );
+}
+
+function IncidentRow(props: { incident: () => Incident; selected: boolean; onOpen: (id: string) => void }) {
   const busy = signal(false);
+  const i = () => props.incident();
   const act = async (fn: (id: string) => Promise<{ incident: Incident }>) => {
     busy.set(true);
     try {
-      upsert((await fn(props.incident().id)).incident);
+      upsert((await fn(i().id)).incident);
     } catch (e) {
       toast(String((e as Error).message ?? e), "error");
     } finally {
@@ -17,63 +33,56 @@ export function IncidentRow(props: { incident: () => Incident; onOpen: (id: stri
     }
   };
   return (
-    <Card onPress={() => props.onOpen(props.incident().id)}>
-      <View class="flex-row items-center gap-2">
-        <View class="h-3 w-3 rounded-full" style={{ backgroundColor: SEV_COLOR[props.incident().severity] }} />
-        <Text class="text-sm text-muted-foreground">
-          {`#${props.incident().number}   ${props.incident().service_name ?? ""}   ${timeAgo(props.incident().created_at)}`}
+    <Row selected={props.selected} onPress={() => props.onOpen(i().id)}>
+      <View class="flex-1 gap-1">
+        <Text class={`font-medium text-card-foreground ${isDesktop ? "text-sm" : "text-base"}`} numberOfLines={2}>
+          {i().title}
         </Text>
-        <View class="flex-1" />
-        <Pill label={props.incident().status} color={STATUS_COLOR[props.incident().status]} />
+        <View class="flex-row flex-wrap items-center gap-x-2.5 gap-y-0.5">
+          <SeverityMark severity={i().severity} />
+          <Meta>#{i().number}</Meta>
+          {i().service_name && <Meta>{i().service_name}</Meta>}
+          {i().alert_count > 1 && <Meta>{i().alert_count} alerts</Meta>}
+          <Meta>{timeAgo(i().created_at)}</Meta>
+        </View>
       </View>
-      <Text class="text-base font-semibold text-card-foreground" numberOfLines={3}>
-        {props.incident().title}
-      </Text>
-      {props.incident().alert_count > 1 && (
-        <Text class="text-sm text-muted-foreground">{props.incident().alert_count} alerts</Text>
-      )}
-      <View class="flex-row gap-2 pt-1">
-        {props.incident().status === "triggered" && (
-          <Btn title="Acknowledge" variant="danger" grow disabled={busy()} onPress={() => act(api().acknowledge)} />
-        )}
-        <Btn title="Resolve" variant="ghost" grow disabled={busy()} onPress={() => act(api().resolve)} />
-      </View>
-    </Card>
+      <If
+        when={i().status === "triggered"}
+        else={<Btn title="Resolve" variant="secondary" compact busy={busy()} onPress={() => act(api().resolve)} />}
+      >
+        <Btn title="Acknowledge" variant="secondary" compact busy={busy()} onPress={() => act(api().acknowledge)} />
+      </If>
+    </Row>
   );
 }
 
-export function Incidents(props: { onOpen: (id: string) => void }) {
+export function Incidents(props: { selected?: string | null; onOpen: (id: string) => void }) {
+  const list = (items: Incident[]) => (
+    <Surface>
+      <Each of={items} key={(i: Incident) => i.id}>
+        {(i) => <IncidentRow incident={i} selected={props.selected === i().id} onOpen={props.onOpen} />}
+      </Each>
+    </Surface>
+  );
   return (
     <Scroll class="flex-1 bg-background">
-      <View class={`w-full gap-3 self-center p-4 ${isDesktop ? "max-w-3xl" : ""}`}>
-        <View class="flex-row items-center gap-2">
-          <View
-            class="h-2 w-2 rounded-full"
-            style={{ backgroundColor: connection() === "live" ? "#16a34a" : connection() === "connecting" ? "#ca8a04" : "#9ca3af" }}
-          />
-          <Text class="text-sm text-muted-foreground">
-            {connection() === "live" ? "Live" : connection() === "connecting" ? "Connecting…" : "Offline — refreshing every 30s"}
-          </Text>
-          <View class="flex-1" />
-          <Text class="text-sm font-semibold text-primary" onPress={() => refresh()} role="button">
-            Refresh
-          </Text>
-        </View>
-
-        {lastError() && <Text class="text-destructive">{lastError()}</Text>}
-
-        <SectionTitle title={`Triggered (${triggered().length})`} />
-        <If when={triggered().length > 0} else={<Empty title="All quiet" hint="Nothing is waiting for an acknowledgement." />}>
-          <Each of={triggered()} key={(i: Incident) => i.id}>
-            {(i) => <IncidentRow incident={i} onOpen={props.onOpen} />}
-          </Each>
+      <View class="w-full max-w-3xl gap-5 self-center p-3">
+        <If when={lastError()}>
+          <Callout tone="critical" title={lastError()!} />
         </If>
 
-        <If when={acknowledged().length > 0}>
-          <SectionTitle title={`Acknowledged (${acknowledged().length})`} />
-          <Each of={acknowledged()} key={(i: Incident) => i.id}>
-            {(i) => <IncidentRow incident={i} onOpen={props.onOpen} />}
-          </Each>
+        <If when={incidents().length > 0} else={<Empty icon="check" title="All quiet" hint="Nothing is open." />}>
+          <Section title="Triggered" count={triggered().length} right={<IconBtn icon="refresh" label="Refresh" onPress={() => refresh()} />}>
+            <If when={triggered().length > 0} else={<Surface><Empty title="All quiet" hint="Nothing is waiting for an acknowledgement." /></Surface>}>
+              {list(triggered())}
+            </If>
+          </Section>
+
+          <If when={acknowledged().length > 0}>
+            <Section title="Acknowledged" count={acknowledged().length}>
+              {list(acknowledged())}
+            </Section>
+          </If>
         </If>
       </View>
     </Scroll>

@@ -2,7 +2,7 @@
 import { Overlay, safeArea, signal, Text, View } from "nsh";
 import { Toast, type ToastEntry, ToastManager, ToastStack } from "nsh/base";
 import type { Severity } from "./api";
-import { SEV_COLOR } from "./ui";
+import { Dot } from "./ui";
 
 type Value = { title: string; severity: Severity };
 
@@ -44,12 +44,12 @@ export function Toaster() {
                 manager.dismiss(t().id);
                 sync();
               }}
-              class="flex-row items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 shadow-lg transition-all duration-200"
+              class="flex-row items-center gap-2.5 rounded-(--radius) border border-border bg-popover px-3 py-2.5 shadow-lg transition-all duration-200"
               startingClass="opacity-0 -translate-y-4"
               endingClass="opacity-0 scale-95"
             >
-              <View class="h-3 w-3 rounded-full" style={{ backgroundColor: SEV_COLOR[(t().value as Value).severity] }} />
-              <Text class="flex-1 font-semibold text-card-foreground" numberOfLines={2}>
+              <Dot tone={(t().value as Value).severity} />
+              <Text class="flex-1 text-sm font-medium text-popover-foreground" numberOfLines={2}>
                 {(t().value as Value).title}
               </Text>
             </Toast>

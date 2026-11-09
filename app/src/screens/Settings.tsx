@@ -1,21 +1,21 @@
-import { resource, Scroll, signal, Text, View } from "nsh";
-import { AlertDialog, Input, Switch, Tab, Tabs } from "nsh/base";
+import { resource, signal, Text, token, View } from "nsh";
+import { AlertDialog, Input, Switch } from "nsh/base";
 import type { ContactMethod, Severity } from "../api";
 import { pushEnable, pushState } from "../host";
 import { api, me, session, signOut } from "../store";
 import { toast } from "../toast";
-import { Btn, SectionTitle } from "../ui";
-
-const field = "rounded-(--radius) border border-border bg-background px-3 py-2.5 text-foreground placeholder:text-muted-foreground";
+import { ActionMenu, Badge, Btn, Callout, Chips, Failed, Field, field, FormSheet, Icon, IconBtn, type IconName, isDesktop, Loading, MenuBtn, Meta, Page, Row, Section, Segmented, SEV_LABEL, Surface } from "../ui";
 
 type Kind = ContactMethod["type"];
 
 const KINDS: { value: Kind; label: string; hint: string }[] = [
-  { value: "ntfy", label: "Push", hint: "Phone & desktop push through the ntfy app (iOS, Android, web). Install ntfy and subscribe to the topic." },
-  { value: "tuya", label: "Tuya", hint: "A Tuya siren, smart plug or light that goes off when you're paged and stops when acknowledged." },
-  { value: "slack", label: "Slack", hint: "A Slack incoming-webhook URL." },
+  { value: "ntfy", label: "Push", hint: "Phone and desktop push through the ntfy app. Install ntfy and subscribe to the topic." },
+  { value: "tuya", label: "Tuya", hint: "A Tuya siren, plug or light that goes off when you're paged and stops when acknowledged." },
+  { value: "slack", label: "Slack", hint: "A Slack incoming webhook." },
   { value: "webhook", label: "Webhook", hint: "POSTs JSON to your URL on page, acknowledge and resolve." },
 ];
+
+const ICON: Record<string, IconName> = { ntfy: "phone", tuya: "zap", slack: "hash", webhook: "link", webpush: "monitor" };
 
 const SEVERITIES: Severity[] = ["info", "warning", "error", "critical"];
 
@@ -25,17 +25,19 @@ function describe(cm: ContactMethod): string {
     case "ntfy":
       return `${c.server}/${c.topic}`;
     case "tuya":
-      return `device ${c.device_id}`;
+      return `Device ${c.device_id}`;
     case "slack":
       return "Slack webhook";
     case "webpush":
-      return "Notifications on this browser, even when Pager is closed";
+      return "This browser, even when Pager is closed";
     default:
       return c.url ?? "";
   }
 }
 
 function MethodRow(props: { cm: () => ContactMethod; reload: () => void }) {
+  const cm = () => props.cm();
+  const name = () => cm().label || cm().type;
   const guard = async (fn: () => Promise<unknown>, ok?: string) => {
     try {
       await fn();
@@ -47,44 +49,51 @@ function MethodRow(props: { cm: () => ContactMethod; reload: () => void }) {
   };
   const remove = async () => {
     const action = await AlertDialog.show({
-      title: "Remove this contact method?",
+      title: `Remove ${name()}?`,
+      description: "It stops getting pages. Its settings are not kept.",
       actions: [
         { label: "Cancel", role: "cancel", id: "cancel" },
         { label: "Remove", role: "destructive", id: "remove" },
       ],
     });
-    if (action === "remove") guard(() => api().deleteContactMethod(props.cm().id));
-  };
-  const cycleSeverity = () => {
-    const next = SEVERITIES[(SEVERITIES.indexOf(props.cm().min_severity) + 1) % SEVERITIES.length];
-    guard(() => api().updateContactMethod(props.cm().id, { min_severity: next }));
+    if (action === "remove") guard(() => api().deleteContactMethod(cm().id));
   };
   return (
-    <View class="gap-2 rounded-xl border border-border bg-card p-4">
-      <Switch
-        checked={props.cm().enabled}
-        onChange={(checked) => guard(() => api().updateContactMethod(props.cm().id, { enabled: checked }))}
-        class="flex-row items-center gap-3"
-        trackClass="w-11 rounded-full bg-muted p-0.5 transition-colors checked:bg-primary"
-        thumbClass="size-5 rounded-full bg-background shadow-sm transition-transform checked:translate-x-5"
-      >
-        <View class="flex-1">
-          <Text class="font-semibold text-card-foreground">{props.cm().label || props.cm().type}</Text>
-          <Text class="text-sm text-muted-foreground" numberOfLines={1}>
-            {describe(props.cm())}
-          </Text>
+    <Row>
+      <View class="flex-1 gap-2">
+        <View class="flex-row items-center gap-3">
+          <Icon name={ICON[cm().type] ?? "bell"} size={16} tint={token("muted-foreground")} />
+          <View class="flex-1">
+            <Text class="text-sm font-medium text-card-foreground" numberOfLines={1}>{name()}</Text>
+            <Text class="text-xs text-muted-foreground" numberOfLines={1}>{describe(cm())}</Text>
+          </View>
+          <Switch
+            checked={cm().enabled}
+            accessibilityLabel={`Page ${name()}`}
+            onChange={(checked) => guard(() => api().updateContactMethod(cm().id, { enabled: checked }))}
+            trackClass="w-9 rounded-full bg-input p-0.5 transition-colors checked:bg-primary"
+            thumbClass="size-4 rounded-full bg-card shadow-sm transition-transform checked:translate-x-4"
+          />
         </View>
-      </Switch>
-      <View class="flex-row flex-wrap gap-2">
-        <Btn title="Send test" variant="ghost" onPress={() => guard(() => api().testContactMethod(props.cm().id), "Test page sent")} />
-        <Btn title={`Pages: ${props.cm().min_severity}+`} variant="ghost" onPress={cycleSeverity} />
-        <Btn title="Remove" variant="ghost" onPress={remove} />
+        <View class="flex-row flex-wrap items-center gap-1.5 pl-7">
+          <ActionMenu
+            trigger={<MenuBtn title={`${SEV_LABEL[cm().min_severity]} and up`} testID={`severity-${cm().id}`} />}
+            items={SEVERITIES.map((s) => ({
+              label: `${SEV_LABEL[s]} and up`,
+              checked: s === cm().min_severity,
+              onSelect: () => guard(() => api().updateContactMethod(cm().id, { min_severity: s })),
+            }))}
+          />
+          <Btn title="Send test" variant="ghost" onPress={() => guard(() => api().testContactMethod(cm().id), "Test page sent")} />
+          <View class="flex-1" />
+          <IconBtn icon="trash" label={`Remove ${name()}`} onPress={remove} />
+        </View>
       </View>
-    </View>
+    </Row>
   );
 }
 
-function AddMethod(props: { presets: string[]; onAdded: () => void }) {
+function AddMethod(props: { open: boolean; onClose: () => void; presets: string[]; onAdded: () => void }) {
   const kind = signal<Kind>("ntfy");
   const label = signal("");
   const a = signal(""); // topic / device id / url
@@ -112,6 +121,7 @@ function AddMethod(props: { presets: string[]; onAdded: () => void }) {
       a.set("");
       b.set("");
       props.onAdded();
+      props.onClose();
     } catch (e) {
       toast(String((e as Error).message ?? e), "error");
     } finally {
@@ -120,39 +130,29 @@ function AddMethod(props: { presets: string[]; onAdded: () => void }) {
   };
 
   return (
-    <View class="gap-3 rounded-xl border border-border bg-card p-4">
-      <Tabs class="flex-row self-start gap-1 rounded-lg bg-muted p-1">
-        {KINDS.map((k) => (
-          <Tab selected={kind() === k.value} onPress={() => (kind.set(k.value), a.set(""), b.set(""))} class="group rounded-(--radius) px-3 py-1.5 selected:bg-background">
-            <Text class="text-sm text-muted-foreground group-selected:text-foreground">{k.label}</Text>
-          </Tab>
-        ))}
-      </Tabs>
-      <Text class="text-sm text-muted-foreground">{KINDS.find((k) => k.value === kind())!.hint}</Text>
-
-      <Input value={label()} onChange={(value) => label.set(value)} placeholder="Label (e.g. Desk siren)" class={field} />
-      <Input
-        value={a()}
-        onChange={(value) => a.set(value)}
-        autoCapitalize="none"
-        autoCorrect={false}
-        placeholder={
-          kind() === "ntfy" ? "Topic (long and random, e.g. pager-alice-7f3k9q)" : kind() === "tuya" ? "Tuya device id" : "https://…"
-        }
-        class={field}
-      />
-      {kind() === "ntfy" && (
-        <Input value={b()} onChange={(value) => b.set(value)} autoCapitalize="none" placeholder="Server (default https://ntfy.sh)" class={field} />
-      )}
-      {kind() === "tuya" && (
-        <View class="flex-row flex-wrap gap-2">
-          {props.presets.map((p) => (
-            <Btn title={p} variant={(b() || "siren") === p ? "primary" : "ghost"} onPress={() => b.set(p)} />
-          ))}
-        </View>
-      )}
-      <Btn title={busy() ? "Adding…" : "Add contact method"} disabled={busy() || !a()} onPress={add} />
-    </View>
+    <FormSheet open={props.open} onClose={props.onClose} title="Add contact method">
+      <View class="gap-1.5">
+        <Segmented options={KINDS} value={kind()} onChange={(v) => (kind.set(v), a.set(""), b.set(""))} />
+        <Text class="text-xs text-muted-foreground">{KINDS.find((k) => k.value === kind())!.hint}</Text>
+      </View>
+      <Field label="Label">
+        <Input value={label()} onChange={(value) => label.set(value)} placeholder="Desk siren" class={field} />
+      </Field>
+      <Field label={kind() === "ntfy" ? "Topic" : kind() === "tuya" ? "Device ID" : "URL"} hint={kind() === "ntfy" ? "Long and random, like pager-alice-7f3k9q." : undefined}>
+        <Input value={a()} onChange={(value) => a.set(value)} autoCapitalize="none" autoCorrect={false} placeholder={kind() === "ntfy" || kind() === "tuya" ? "" : "https://…"} class={field} />
+      </Field>
+      <If when={kind() === "ntfy"}>
+        <Field label="Server">
+          <Input value={b()} onChange={(value) => b.set(value)} autoCapitalize="none" placeholder="https://ntfy.sh" class={field} />
+        </Field>
+      </If>
+      <If when={kind() === "tuya"}>
+        <Field label="Preset">
+          <Chips options={props.presets.map((p) => ({ id: p, label: p }))} selected={[b() || "siren"]} onToggle={(id) => b.set(id)} />
+        </Field>
+      </If>
+      <Btn title={busy() ? "Adding…" : "Add"} busy={busy()} disabled={!a()} onPress={add} />
+    </FormSheet>
   );
 }
 
@@ -178,11 +178,10 @@ function ThisDevice(props: { methods: ContactMethod[]; onAdded: () => void }) {
   };
   return (
     <If when={state()?.supported && !(state()?.endpoint && paged())}>
-      <If
-        when={!state()?.ios || state()?.standalone}
-        else={<Text class="px-1 text-muted-foreground">To be paged on this iPhone, add Pager to the Home Screen and open it from there.</Text>}
-      >
-        <Btn title={busy() ? "Turning on…" : "Page me on this device"} disabled={busy()} onPress={enable} />
+      <If when={!state()?.ios || state()?.standalone} else={<Callout title="To be paged on this iPhone, add Pager to the Home Screen and open it from there." />}>
+        <View class={isDesktop ? "self-start" : ""}>
+          <Btn title={busy() ? "Turning on…" : "Page me on this device"} busy={busy()} variant="secondary" icon="monitor" onPress={enable} />
+        </View>
       </If>
     </If>
   );
@@ -190,37 +189,44 @@ function ThisDevice(props: { methods: ContactMethod[]; onAdded: () => void }) {
 
 export function Settings() {
   const methods = resource(async () => api().contactMethods());
+  const adding = signal(false);
   return (
-    <Scroll class="flex-1 bg-background">
-      <View class="w-full max-w-3xl gap-3 self-center p-4">
-        <View class="gap-1 rounded-xl border border-border bg-card p-4">
-          <Text class="text-lg font-semibold text-card-foreground">{me()?.name}</Text>
-          <Text class="text-muted-foreground">
-            {`${me()?.email}   ${me()?.role}`}
-          </Text>
-          <Text class="text-sm text-muted-foreground">{session()?.server}</Text>
-        </View>
+    <Page>
+      <Section title="Account">
+        <Surface>
+          <Row>
+            <View class="flex-1 gap-0.5">
+              <View class="flex-row items-center gap-1.5">
+                <Text class="text-sm font-medium text-card-foreground" numberOfLines={1}>{me()?.name}</Text>
+                <If when={me()?.role === "admin"}>
+                  <Badge label="Admin" />
+                </If>
+              </View>
+              <Meta>{me()?.email}</Meta>
+              <Meta selectable>{session()?.server}</Meta>
+            </View>
+            <Btn title="Sign out" variant="secondary" onPress={() => signOut()} />
+          </Row>
+        </Surface>
+      </Section>
 
-        <SectionTitle title="How you get paged" />
-        <If when={methods()} else={<Text class="text-muted-foreground">{methods.error() ? String(methods.error()) : "Loading…"}</Text>}>
+      <Section title="How you get paged" right={<Btn title="Add" variant="ghost" icon="plus" onPress={() => adding.set(true)} />}>
+        <If when={methods()} else={methods.error() ? <Failed error={methods.error()} onRetry={() => methods.refetch()} /> : <Loading />}>
           {(m) => (
-            <>
-              <If when={m().contact_methods.length > 0} else={<Text class="px-1 text-destructive">No contact methods: you will only see pages while this app is open.</Text>}>
-                <Each of={m().contact_methods} key={(c: ContactMethod) => c.id}>
-                  {(c) => <MethodRow cm={c} reload={() => methods.refetch()} />}
-                </Each>
+            <View class="gap-2">
+              <If when={m().contact_methods.length > 0} else={<Callout tone="critical" title="You only see pages while this app is open." />}>
+                <Surface>
+                  <Each of={m().contact_methods} key={(c: ContactMethod) => c.id}>
+                    {(c) => <MethodRow cm={c} reload={() => methods.refetch()} />}
+                  </Each>
+                </Surface>
               </If>
               <ThisDevice methods={m().contact_methods} onAdded={() => methods.refetch()} />
-              <SectionTitle title="Add" />
-              <AddMethod presets={m().tuya_presets} onAdded={() => methods.refetch()} />
-            </>
+              <AddMethod open={adding()} onClose={() => adding.set(false)} presets={m().tuya_presets} onAdded={() => methods.refetch()} />
+            </View>
           )}
         </If>
-
-        <View class="pt-6">
-          <Btn title="Sign out" variant="ghost" onPress={() => signOut()} />
-        </View>
-      </View>
-    </Scroll>
+      </Section>
+    </Page>
   );
 }
