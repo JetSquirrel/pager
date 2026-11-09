@@ -90,4 +90,12 @@ Register one under **Settings → Hardware pagers**; the token is shown once, fo
 | Hold 2 s | Snooze it for 30 minutes |
 
 A press that cannot reach the server rings again rather than staying silent. After 5 minutes without the server the
-board chirps once a minute.
+board chirps once a minute; `pager_clear` on the serial console forgets the server and token and quiets it.
+
+The settings console is the board's user UART at 115200 baud (the lower-numbered of its two USB ports on the T5AI-Core);
+the other port carries the chip's log at 460800. The board has 2.4 GHz Wi-Fi only.
+
+### Reaching the server
+
+The board resolves the server's name through the local network's DNS and has no proxy support, so it needs a hostname
+that network can really reach. `*.workers.dev` is poisoned on mainland China networks: use a custom domain there.

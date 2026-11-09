@@ -12,6 +12,7 @@
  *   pager_url  http://192.168.1.20:8787  |  https://pager.example.com
  *   pager_token dev_xxxxxxxx
  *   pager_show       pager_test       pager_reboot
+ *   pager_clear      forget the server and token; the board goes quiet until it is set up again
  *
  * LED: off = all clear · solid = acknowledged incidents still open · fast blink = PAGING ·
  *      slow blink = not configured / no Wi-Fi / server unreachable.
@@ -47,6 +48,8 @@
 #define KV_TOKEN "pg.token"
 
 #define LONG_POLL_S       20
+/* TuyaOpen gives a plain TCP read 5 s whatever the request asks for; only TLS honours the timeout. */
+#define LONG_POLL_PLAIN_S 3
 #define HTTP_TIMEOUT_MS   ((LONG_POLL_S + 10) * 1000)
 #define BACKOFF_MAX_MS    30000
 #define SAMPLE_RATE       16000
@@ -304,7 +307,8 @@ static void __poll_task(void *arg)
         }
 
         if (sg_st.version > 0) {
-            snprintf(path, sizeof(path), "/v1/device/state?v=%.0f&wait=%d", sg_st.version, LONG_POLL_S);
+            snprintf(path, sizeof(path), "/v1/device/state?v=%.0f&wait=%d", sg_st.version,
+                     sg_cfg.tls ? LONG_POLL_S : LONG_POLL_PLAIN_S);
         } else {
             snprintf(path, sizeof(path), "/v1/device/state");
         }
@@ -547,6 +551,22 @@ static void __cmd_token(int argc, char *argv[])
     tal_cli_echo("token saved\r\n");
 }
 
+static void __cmd_clear(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    tal_kv_del(KV_URL);
+    tal_kv_del(KV_TOKEN);
+    __load_cfg();
+    tal_mutex_lock(sg_mutex);
+    sg_st.alert = false;
+    sg_st.count = sg_st.acked = 0;
+    sg_st.version = 0;
+    tal_mutex_unlock(sg_mutex);
+    tal_semaphore_post(sg_wake_sem);
+    tal_cli_echo("server and token cleared\r\n");
+}
+
 static void __cmd_show(int argc, char *argv[])
 {
     char buf[400];
@@ -583,6 +603,7 @@ static const cli_cmd_t sg_cmds[] = {
     {.name = "pager_wifi", .help = "pager_wifi <ssid> [password]", .func = __cmd_wifi},
     {.name = "pager_url", .help = "pager_url <http(s)://host[:port]>", .func = __cmd_url},
     {.name = "pager_token", .help = "pager_token <dev_...>", .func = __cmd_token},
+    {.name = "pager_clear", .help = "forget the server and token", .func = __cmd_clear},
     {.name = "pager_show", .help = "show settings and state", .func = __cmd_show},
     {.name = "pager_test", .help = "ring for 5 seconds", .func = __cmd_test},
     {.name = "pager_reboot", .help = "reboot", .func = __cmd_reboot},
