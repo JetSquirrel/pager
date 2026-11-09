@@ -130,6 +130,22 @@ describe("responding from a phone", () => {
     expect(back.events.map((e: any) => e.kind)).toEqual(expect.arrayContaining(["snoozed", "unsnoozed"]));
   });
 
+  it("tells hardware pagers the moment a snooze ends", async () => {
+    const { T, key } = await seed(h);
+    const device = (await h.call("POST", "/v1/devices", { token: T, body: { name: "desk" } })).json.token;
+    const r = await fire(key);
+    await h.alarms();
+    await h.call("POST", `/v1/incidents/${r.incident_id}/snooze`, { token: T, body: { minutes: 30 } });
+    await h.alarms();
+    const during = (await h.call("GET", "/v1/device/state", { device })).json;
+    expect(during).toMatchObject({ alert: 0, acked: 1 });
+
+    await advance(30 * MIN);
+    const after = (await h.call("GET", "/v1/device/state", { device })).json;
+    expect(after).toMatchObject({ alert: 1, count: 1 });
+    expect(after.v).toBeGreaterThan(during.v);
+  });
+
   it("resolving during a snooze ends it for good", async () => {
     const { T, key } = await seed(h);
     await addHook(T, "https://alice.test/");

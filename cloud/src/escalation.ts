@@ -124,9 +124,11 @@ async function advance(env: Env, incidentId: string): Promise<void> {
   if (!esc || esc.stopped) return;
 
   let incident = await getIncident(env, incidentId);
+  let resumed = false;
   if (incident?.snoozed_until != null && incident.status === "acknowledged") {
     if (now() < incident.snoozed_until) return;
     incident = await endSnooze(env, incident);
+    resumed = true;
   }
   if (!incident || incident.status !== "triggered") {
     await stopEscalation(env, incidentId);
@@ -166,5 +168,6 @@ async function advance(env: Env, incidentId: string): Promise<void> {
     await env.DB.prepare(`UPDATE escalations SET next_at = ? WHERE incident_id = ?`).bind(t + NOBODY_REACHED_MS, incidentId).run();
   }
   env.wake();
-  if (step > 0) await broadcast(env, "incident.updated", updated);
+  // Step 0 of a new incident was announced when it was created; the end of a snooze has not been.
+  if (step > 0 || resumed) await broadcast(env, "incident.updated", updated);
 }
