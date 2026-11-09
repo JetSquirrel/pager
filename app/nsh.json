@@ -25,7 +25,9 @@
     "host": [
       "pageInfo",
       "notify",
-      "requestNotifications"
+      "requestNotifications",
+      "pushState",
+      "pushEnable"
     ],
     "statusBar": true,
     "clipboard": true

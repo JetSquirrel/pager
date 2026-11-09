@@ -4,6 +4,8 @@
 import { Hono } from "hono";
 import type { AppEnv } from "./auth";
 import { requireUser } from "./auth";
+import { DEVICE_SEEN_MS } from "./budget";
+import type { Db } from "./db";
 import { acknowledge, rowToIncident } from "./incidents";
 import type { Env, Incident, User } from "./types";
 import { HttpError, newId, newSecret, now, sha256Hex } from "./util";
@@ -42,15 +44,18 @@ export function deviceStateFor(userId: string, open: Incident[], v: number, at =
   };
 }
 
-async function openIncidents(env: Env): Promise<Incident[]> {
-  const { results } = await env.DB.prepare(
-    `SELECT i.*, s.name AS service_name FROM incidents i JOIN services s ON s.id = i.service_id
-      WHERE i.status != 'resolved' ORDER BY i.created_at DESC LIMIT 500`,
-  ).all<Record<string, unknown>>();
-  return results.map(rowToIncident);
+export function openIncidents(db: Db): Incident[] {
+  return db
+    .execute(
+      `SELECT i.*, s.name AS service_name FROM incidents i JOIN services s ON s.id = i.service_id
+        WHERE i.status != 'resolved' ORDER BY i.created_at DESC LIMIT 500`,
+      [],
+    )
+    .rows.map(rowToIncident);
 }
 
-type DeviceEnv = { Bindings: Env; Variables: { device: { id: string; user_id: string; name: string }; user: User } };
+type DeviceRow = { id: string; user_id: string; name: string; last_seen_at: number | null };
+type DeviceEnv = { Bindings: Env; Variables: { device: DeviceRow; user: User } };
 
 // ------------------------------------------------------------------ the device's own API
 
@@ -60,9 +65,9 @@ deviceApi.use("*", async (c, next) => {
   const h = c.req.header("authorization") ?? "";
   const token = h.toLowerCase().startsWith("device ") ? h.slice(7).trim() : null;
   if (!token) throw new HttpError(401, "missing device token");
-  const device = await c.env.DB.prepare(`SELECT id, user_id, name FROM devices WHERE token_hash = ?`)
+  const device = await c.env.DB.prepare(`SELECT id, user_id, name, last_seen_at FROM devices WHERE token_hash = ?`)
     .bind(await sha256Hex(token))
-    .first<{ id: string; user_id: string; name: string }>();
+    .first<DeviceRow>();
   if (!device) throw new HttpError(401, "unknown device");
   c.set("device", device);
   await next();
@@ -71,26 +76,24 @@ deviceApi.use("*", async (c, next) => {
 /**
  * GET /v1/device/state?v=<last v>&wait=<seconds, max 25>
  * Returns at once when anything changed since v (or without v), else after the next change or the wait.
+ * The waiting is done by the Worker (src/index.ts); with an Upgrade header this answers over a hibernating socket.
  */
 deviceApi.get("/state", async (c) => {
   const d = c.get("device");
-  const hub = c.env.HUB.get(c.env.HUB.idFromName("global"));
-  const seen = Number(c.req.query("v") ?? NaN);
-  const wait = Math.min(25, Math.max(0, Number(c.req.query("wait") ?? 0)));
-  const v = Number.isFinite(seen) && wait > 0 ? await hub.waitForChange(seen, wait * 1000) : await hub.currentVersion();
-  const fw = c.req.header("x-firmware");
-  c.executionCtx.waitUntil(
-    c.env.DB.prepare(`UPDATE devices SET last_seen_at = ?, last_ip = ?, firmware = COALESCE(?, firmware) WHERE id = ?`)
-      .bind(now(), c.req.header("cf-connecting-ip") ?? null, fw ?? null, d.id)
-      .run(),
-  );
-  return c.json(deviceStateFor(d.user_id, await openIncidents(c.env), v));
+  if (d.last_seen_at === null || now() - d.last_seen_at >= DEVICE_SEEN_MS) {
+    await c.env.DB.prepare(`UPDATE devices SET last_seen_at = ?, last_ip = ?, firmware = COALESCE(?, firmware) WHERE id = ?`)
+      .bind(now(), c.req.header("cf-connecting-ip") ?? null, c.req.header("x-firmware") ?? null, d.id)
+      .run();
+  }
+  const state = deviceStateFor(d.user_id, openIncidents(c.env.DB), c.env.version());
+  if (c.req.header("upgrade")?.toLowerCase() === "websocket") return c.env.acceptDevice(d.user_id, state);
+  return c.json(state);
 });
 
 /** POST /v1/device/ack — the button: acknowledges every incident currently paging this device's user. */
 deviceApi.post("/ack", async (c) => {
   const d = c.get("device");
-  const mine = (await openIncidents(c.env)).filter((i) => i.status === "triggered" && i.assignees.includes(d.user_id));
+  const mine = openIncidents(c.env.DB).filter((i) => i.status === "triggered" && i.assignees.includes(d.user_id));
   for (const i of mine) await acknowledge(c.env, c.executionCtx, i, d.user_id, `Acknowledged on ${d.name}`);
   return c.json({ acknowledged: mine.map((i) => i.number) });
 });

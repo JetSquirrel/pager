@@ -1,3 +1,5 @@
+import { startEscalation, stopEscalation } from "./escalation";
+import { enqueue } from "./notify/dispatch";
 import type { AlertEvent, Env, Incident, IncidentStatus, NotifyEvent } from "./types";
 import { newId, now, parseJson } from "./util";
 
@@ -85,7 +87,8 @@ export async function processAlert(
     const t = now();
     await env.DB.batch([
       env.DB.prepare(`UPDATE incidents SET alert_count = alert_count + 1, updated_at = ? WHERE id = ?`).bind(t, open.id),
-      addEvent(env, open.id, "alert_repeated", { message: ev.title, at: t }),
+      // An alert storm must not eat the day's write budget: the count is enough once the budget is tight.
+      ...(env.pressure() === "ok" ? [addEvent(env, open.id, "alert_repeated", { message: ev.title, at: t })] : []),
     ]);
     const updated = { ...open, alert_count: open.alert_count + 1, updated_at: t };
     ctx.waitUntil(broadcast(env, "incident.updated", updated));
@@ -110,8 +113,8 @@ export async function processAlert(
     if (String(e).includes("UNIQUE")) return processAlert(env, ctx, service, ev);
     throw e;
   }
+  await startEscalation(env, id);
   const incident = (await getIncident(env, id))!;
-  await env.ESCALATOR.get(env.ESCALATOR.idFromName(id)).start(id);
   ctx.waitUntil(broadcast(env, "incident.triggered", incident));
   return { incident, result: "created" };
 }
@@ -133,9 +136,11 @@ export async function acknowledge(
     addEvent(env, incident.id, "acknowledged", { actor, message, at: t }),
   ]);
   if (!res[0].meta.changes) return (await getIncident(env, incident.id))!;
-  await env.ESCALATOR.get(env.ESCALATOR.idFromName(incident.id)).stop();
+  await stopEscalation(env, incident.id);
   const updated = (await getIncident(env, incident.id))!;
-  ctx.waitUntil(Promise.all([broadcast(env, "incident.updated", updated), notifyUsers(env, updated, updated.assignees, "acknowledge")]));
+  await notifyUsers(env, updated, updated.assignees, "acknowledge");
+  env.wake();
+  ctx.waitUntil(broadcast(env, "incident.updated", updated));
   return updated;
 }
 
@@ -155,9 +160,11 @@ export async function resolve(
     addEvent(env, incident.id, "resolved", { actor, message, at: t }),
   ]);
   if (!res[0].meta.changes) return (await getIncident(env, incident.id))!;
-  await env.ESCALATOR.get(env.ESCALATOR.idFromName(incident.id)).stop();
+  await stopEscalation(env, incident.id);
   const updated = (await getIncident(env, incident.id))!;
-  ctx.waitUntil(Promise.all([broadcast(env, "incident.updated", updated), notifyUsers(env, updated, updated.assignees, "resolve")]));
+  await notifyUsers(env, updated, updated.assignees, "resolve");
+  env.wake();
+  ctx.waitUntil(broadcast(env, "incident.updated", updated));
   return updated;
 }
 
@@ -167,10 +174,9 @@ export async function addNote(env: Env, incident: Incident, actor: string, messa
 }
 
 export async function notifyUsers(env: Env, incident: Incident, userIds: string[], event: NotifyEvent) {
-  if (userIds.length === 0) return;
-  await env.NOTIFY.sendBatch(userIds.map((user_id) => ({ body: { incident_id: incident.id, user_id, event } })));
+  await enqueue(env, incident, userIds, event);
 }
 
 export async function broadcast(env: Env, type: string, incident: Incident) {
-  await env.HUB.get(env.HUB.idFromName("global")).broadcast(JSON.stringify({ type, incident }));
+  env.publish(JSON.stringify({ type, incident }));
 }

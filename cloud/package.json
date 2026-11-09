@@ -5,8 +5,6 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "npm run build:web && wrangler deploy",
-    "db:migrate:local": "wrangler d1 migrations apply pager --local",
-    "db:migrate": "wrangler d1 migrations apply pager --remote",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build:web": "node scripts/build-web.mjs"

@@ -6,20 +6,20 @@ escalates until someone acknowledges, and turns sirens off when they do.
 
 | Part | What | Where |
 |---|---|---|
-| Cloud | Cloudflare Worker + D1 + Durable Objects + Queues + KV | [`cloud/`](cloud) |
+| Cloud | One Cloudflare Worker and one SQLite Durable Object, on the free plan | [`cloud/`](cloud) |
 | Clients | One [NSH (Native Shell)](https://nsh.dev) TSX app: iOS, Android, macOS, Windows, Linux, web | [`app/`](app) |
 | Hardware | Tuya sirens, smart plugs and lights, driven through Tuya Cloud | [`docs/hardware-tuya.md`](docs/hardware-tuya.md) |
 
 ```
  Alertmanager / Grafana / curl ──► Worker /v1/integrations/{key}/…
-                                       │  dedup (service, dedup_key) in D1
                                        ▼
-                                 Escalator DO (1 per incident, alarms)
-                                       │ step N: schedules → on-call user
+                           Durable Object `Pager` (SQLite)
+                      incidents, on-call, escalations, outbox
+                                       │ one alarm
                                        ▼
-                                 Queue pager-notify ──► ntfy push · Slack · webhook · Tuya device
+                 Web Push · ntfy · Slack · webhook · Tuya device
                                        │
-            Hub DO (WebSockets) ◄──────┘ live updates ──► NSH app (mobile / desktop / web)
+             hibernating sockets ──► NSH app · hardware pagers
 ```
 
 See [docs/architecture.md](docs/architecture.md) for the design.
@@ -29,8 +29,7 @@ See [docs/architecture.md](docs/architecture.md) for the design.
 ```sh
 cd cloud
 npm install
-cp .dev.vars.example .dev.vars          # set BOOTSTRAP_TOKEN, ACTION_SECRET
-npm run db:migrate:local
+cp .dev.vars.example .dev.vars          # set BOOTSTRAP_TOKEN
 npm run dev                              # http://127.0.0.1:8787
 bash scripts/smoke.sh                    # end-to-end check against a fresh local DB
 npm test                                 # unit tests
@@ -52,26 +51,24 @@ Sign in with the server URL and the token from `POST /v1/setup`.
 
 The web build is also served by the Worker itself: `npm run build:web` (in `cloud/`) packages it into
 `cloud/public/app/`, and `wrangler dev` / `deploy` serve it at `/app/` — the sign-in screen fills in the server from
-the page's origin, the tab raises browser notifications for new pages while it is in the background, and
+the page's origin, **Settings → Page me on this device** pages that browser even when Pager is closed (on an iPhone, from
+the Home Screen), and
 `/app/#/incidents/<id>` (the link in push notifications) opens that incident.
 
 ## Deploy to Cloudflare
 
+The free plan is enough. There is nothing to create by hand:
+
 ```sh
 cd cloud
-npx wrangler d1 create pager                 # put the id in wrangler.jsonc
-npx wrangler kv namespace create CACHE       # put the id in wrangler.jsonc
-npx wrangler queues create pager-notify
-npx wrangler queues create pager-notify-dlq
-npx wrangler secret put BOOTSTRAP_TOKEN
-npx wrangler secret put ACTION_SECRET
+npm run deploy                               # builds the web app, then wrangler deploy
+npx wrangler secret put BOOTSTRAP_TOKEN      # used once, by /v1/setup
 npx wrangler secret put TUYA_CLIENT_ID       # optional, for Tuya devices
 npx wrangler secret put TUYA_CLIENT_SECRET
-npm run db:migrate
-npm run deploy                               # builds the web app, then wrangler deploy
 ```
 
-Set `PUBLIC_URL` (and `TUYA_ENDPOINT` for your Tuya data center) in `wrangler.jsonc`.
+For Tuya, set `TUYA_ENDPOINT` to your data center in `wrangler.jsonc`. If you reach the pager through a custom domain, set
+`PUBLIC_URL` there too; otherwise links use the address of the first request.
 
 ## First-time setup
 
@@ -131,3 +128,6 @@ All under `/v1`, `Authorization: Bearer <token>`.
 | GET/POST/DELETE | `/users` | Admin |
 | GET/POST/PATCH/DELETE | `/contact-methods`, `/{id}/test` | Your own paging channels |
 | GET | `/tuya/presets`, `/tuya/devices/{id}/status` | |
+| GET | `/push/vapid` | Public key for Web Push subscriptions |
+| GET | `/usage` | Admin: today's use of the free plan |
+| GET | `/health` | No auth. `budget` is `ok`, `lean` or `shed`: worth an uptime check |

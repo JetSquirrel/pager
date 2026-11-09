@@ -106,7 +106,7 @@ test("opens an incident: timeline, escalation, acknowledge", async () => {
   expect(app.shows("Step 1")).toBe(true);
   await app.press("Acknowledge");
   await app.waitFor("Escalation stopped");
-  await app.waitFor("Acknowledged · Alice");
+  await app.waitFor("Acknowledged   Alice");
 });
 
 test("admin sets up a rotation, a policy and a service", async () => {
@@ -160,4 +160,42 @@ test("admin sets up a rotation, a policy and a service", async () => {
   await app.press("Create service");
   await app.press("Copy Alertmanager URL");
   expect(app.clipboard()).toBe(`${SERVER}/v1/integrations/key_1/alertmanager`);
+});
+
+test("turns on paging for this browser from Settings", async () => {
+  const added: unknown[] = [];
+  const sub = { endpoint: "https://push.test/abc", keys: { p256dh: "p", auth: "a" }, label: "Android Chrome" };
+  let subscribed = false;
+  const app = await open("App.tsx", {
+    network: api({
+      [`GET ${SERVER}/v1/push/vapid`]: { body: { publicKey: "key" } },
+      [`POST ${SERVER}/v1/contact-methods`]: (req: { body: string }) => {
+        added.push(JSON.parse(req.body));
+        subscribed = true;
+        return { status: 201, body: { id: "cm_1" } };
+      },
+      [`GET ${SERVER}/v1/contact-methods`]: () => ({
+        body: {
+          contact_methods: subscribed
+            ? [{ id: "cm_1", type: "webpush", label: "Android Chrome", config: { endpoint: sub.endpoint }, min_severity: "info", enabled: true }]
+            : [],
+          tuya_presets: ["siren"],
+        },
+      }),
+    }),
+    storage: { "pager.session": JSON.stringify({ server: SERVER, token: "tok" }) },
+    host: {
+      handlers: {
+        pushState: () => ({ supported: true, ios: false, standalone: false, endpoint: subscribed ? sub.endpoint : null }),
+        pushEnable: sub,
+      },
+    },
+  });
+  await app.waitFor("Disk 95% on db1");
+  await app.press("Settings");
+  await app.waitFor("Page me on this device");
+  await app.press("Page me on this device");
+  await app.waitFor("Android Chrome");
+  expect(added).toEqual([{ type: "webpush", label: "Android Chrome", config: { endpoint: sub.endpoint, keys: sub.keys } }]);
+  expect(app.shows("Page me on this device")).toBe(false);
 });

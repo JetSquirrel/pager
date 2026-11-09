@@ -143,7 +143,7 @@ export class TuyaClient {
       "Content-Type": "application/json",
     };
     if (accessToken) headers.access_token = accessToken;
-    const res = await fetch(this.env.TUYA_ENDPOINT + path, { method, headers, body: raw || undefined });
+    const res = await fetch(this.env.TUYA_ENDPOINT + path, { method, headers, body: raw || undefined, signal: AbortSignal.timeout(15_000) });
     const json = (await res.json()) as { success: boolean; result: T; code?: number; msg?: string };
     if (!json.success) throw new Error(`Tuya ${method} ${path}: ${json.code} ${json.msg}`);
     return json.result;

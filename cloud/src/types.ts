@@ -1,18 +1,33 @@
-import type { Escalator } from "./escalation";
-import type { Hub } from "./hub";
+import type { Pressure, Usage } from "./budget";
+import type { Db, KvTable } from "./db";
+import type { Vapid } from "./notify/webpush";
+import type { Pager } from "./pager";
 
-export interface Env {
-  DB: D1Database;
-  CACHE: KVNamespace;
-  ESCALATOR: DurableObjectNamespace<Escalator>;
-  HUB: DurableObjectNamespace<Hub>;
-  NOTIFY: Queue<NotifyMessage>;
-  PUBLIC_URL: string;
+/** What Cloudflare hands the Worker. */
+export interface Bindings {
+  PAGER: DurableObjectNamespace<Pager>;
   TUYA_ENDPOINT: string;
+  PUBLIC_URL?: string;
   BOOTSTRAP_TOKEN?: string;
   ACTION_SECRET?: string;
   TUYA_CLIENT_ID?: string;
   TUYA_CLIENT_SECRET?: string;
+}
+
+/** What request code sees inside the Durable Object (src/pager.ts). */
+export interface Env extends Omit<Bindings, "PUBLIC_URL"> {
+  DB: Db;
+  CACHE: KvTable;
+  PUBLIC_URL: string;
+  vapid(): Promise<Vapid>;
+  /** Re-aims the alarm after anything that adds or moves future work. */
+  wake(): void;
+  publish(message: string): void;
+  acceptClient(userId: string): Response;
+  acceptDevice(userId: string, state: unknown): Response;
+  version(): number;
+  pressure(): Pressure;
+  usageToday(): Usage;
 }
 
 export const SEVERITIES = ["info", "warning", "error", "critical"] as const;
@@ -87,14 +102,6 @@ export interface Incident {
 }
 
 export type NotifyEvent = "trigger" | "acknowledge" | "resolve" | "test";
-
-export interface NotifyMessage {
-  incident_id: string;
-  user_id: string;
-  event: NotifyEvent;
-  /** Restrict delivery to one contact method (used by "send test"). */
-  contact_method_id?: string;
-}
 
 /** What an integration hands to the core after parsing its own payload format. */
 export interface AlertEvent {

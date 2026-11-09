@@ -270,7 +270,7 @@ function Users(props: { d: () => Data; reload: () => void }) {
             <Text class="flex-1 text-card-foreground">{u.name}</Text>
             <Text class="text-sm text-muted-foreground">
               {u.email}
-              {u.role === "admin" ? " · admin" : ""}
+              {u.role === "admin" ? "   admin" : ""}
             </Text>
           </View>
         ))}
@@ -307,12 +307,40 @@ function Users(props: { d: () => Data; reload: () => void }) {
   );
 }
 
+const count = (n: number) => n.toLocaleString("en-US");
+
+/** Today's use of the Cloudflare free plan. Past a daily limit the pager cannot page anyone until 00:00 UTC. */
+function FreePlan() {
+  const usage = resource(async () => api().usage());
+  const row = (label: string, used: number, limit: number) => (
+    <View class="flex-row justify-between">
+      <Text class="text-sm text-muted-foreground">{label}</Text>
+      <Text class="text-sm text-card-foreground">{`${count(used)} of ${count(limit)}`}</Text>
+    </View>
+  );
+  return (
+    <If when={usage()}>
+      {(u) => (
+        <View class="gap-1 rounded-xl border border-border bg-card p-4">
+          <Text class={`font-semibold ${u().pressure === "ok" ? "text-card-foreground" : "text-destructive"}`}>
+            {u().pressure === "ok" ? "Free plan today" : "Free plan running out today: repeats and receipts are no longer recorded"}
+          </Text>
+          {row("Requests", u().requests, u().free.requests)}
+          {row("Rows read", u().rowsRead, u().free.rowsRead)}
+          {row("Rows written", u().rowsWritten, u().free.rowsWritten)}
+        </View>
+      )}
+    </If>
+  );
+}
+
 export function Admin() {
   const data = resource(load);
   const reload = () => data.refetch();
   return (
     <Scroll class="flex-1 bg-background">
       <View class="w-full max-w-3xl gap-3 self-center p-4">
+        <FreePlan />
         <If when={data()} else={<Text class="p-2 text-muted-foreground">{data.error() ? String(data.error()) : "Loading…"}</Text>}>
           {(d) => (
             <>

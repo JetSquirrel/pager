@@ -9,36 +9,11 @@
   // The NSH web client (npm run build:web) is served at /app/; the API under /v1 always runs the Worker.
   "assets": { "directory": "./public", "run_worker_first": ["/v1/*"] },
 
-  // Incidents, users, schedules, policies, contact methods.
-  "d1_databases": [
-    { "binding": "DB", "database_name": "pager", "database_id": "REPLACE_WITH_D1_ID", "migrations_dir": "migrations" }
-  ],
+  // Everything else lives in one SQLite-backed Durable Object: nothing to create by hand, runs on the free plan.
+  "durable_objects": { "bindings": [{ "name": "PAGER", "class_name": "Pager" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Pager"] }],
 
-  // Short-lived cache (Tuya access tokens).
-  "kv_namespaces": [{ "binding": "CACHE", "id": "REPLACE_WITH_KV_ID" }],
-
-  // Escalator: one instance per incident, drives the escalation timer with DO alarms.
-  // Hub: one instance, fans incident updates out to connected clients over hibernating WebSockets.
-  "durable_objects": {
-    "bindings": [
-      { "name": "ESCALATOR", "class_name": "Escalator" },
-      { "name": "HUB", "class_name": "Hub" }
-    ]
-  },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Escalator", "Hub"] }],
-
-  // Notification fan-out: every (incident, user, event) becomes one message, retried independently.
-  "queues": {
-    "producers": [{ "binding": "NOTIFY", "queue": "pager-notify" }],
-    "consumers": [{ "queue": "pager-notify", "max_batch_size": 10, "max_batch_timeout": 1, "max_retries": 5, "dead_letter_queue": "pager-notify-dlq" }]
-  },
-
-  // Housekeeping: re-arm stuck escalations, prune old events.
-  "triggers": { "crons": ["*/5 * * * *"] },
-
-  "vars": {
-    "PUBLIC_URL": "https://pager.example.com",
-    "TUYA_ENDPOINT": "https://openapi.tuyaus.com"
-  }
-  // Secrets (wrangler secret put): BOOTSTRAP_TOKEN, ACTION_SECRET, TUYA_CLIENT_ID, TUYA_CLIENT_SECRET
+  "vars": { "TUYA_ENDPOINT": "https://openapi.tuyaus.com" }
+  // Secrets (wrangler secret put): BOOTSTRAP_TOKEN; TUYA_CLIENT_ID and TUYA_CLIENT_SECRET for Tuya devices.
+  // Optional var: PUBLIC_URL, when the pager is reached through a custom domain.
 }

@@ -12,6 +12,7 @@ const KIND_LABEL: Record<string, string> = {
   escalated: "Escalated",
   notify_sent: "Delivered",
   notify_failed: "Delivery failed",
+  notify_gave_up: "Gave up delivering",
   acknowledged: "Acknowledged",
   resolved: "Resolved",
   note: "Note",
@@ -22,6 +23,7 @@ const KIND_COLOR: Record<string, string> = {
   triggered: "#dc2626",
   escalated: "#ea580c",
   notify_failed: "#dc2626",
+  notify_gave_up: "#dc2626",
   escalation_failed: "#dc2626",
   acknowledged: "#ca8a04",
   resolved: "#16a34a",
@@ -37,7 +39,7 @@ function TimelineItem(props: { event: () => IncidentEvent }) {
       <View class="flex-1 gap-0.5 pb-4">
         <Text class="font-semibold text-foreground">
           {KIND_LABEL[props.event().kind] ?? props.event().kind}
-          {props.event().actor_name ? ` · ${props.event().actor_name}` : ""}
+          {props.event().actor_name ? `   ${props.event().actor_name}` : ""}
         </Text>
         {props.event().message && <Text class="text-foreground">{props.event().message}</Text>}
         <Text class="text-xs text-muted-foreground">{clock(props.event().at)}</Text>
@@ -94,7 +96,7 @@ export function IncidentDetail(props: { id: string }) {
               </View>
               <Text class="text-2xl font-bold text-foreground">{d().incident.title}</Text>
               <Text class="text-muted-foreground">
-                {d().incident.service_name} · {d().incident.source || "unknown source"} · opened {timeAgo(d().incident.created_at)}
+                {`${d().incident.service_name}   ${d().incident.source || "unknown source"}   opened ${timeAgo(d().incident.created_at)}`}
               </Text>
               {d().incident.alert_count > 1 && <Text class="text-muted-foreground">{d().incident.alert_count} alerts folded in</Text>}
             </View>

@@ -21,7 +21,7 @@ export function IncidentRow(props: { incident: () => Incident; onOpen: (id: stri
       <View class="flex-row items-center gap-2">
         <View class="h-3 w-3 rounded-full" style={{ backgroundColor: SEV_COLOR[props.incident().severity] }} />
         <Text class="text-sm text-muted-foreground">
-          #{props.incident().number} · {props.incident().service_name ?? ""} · {timeAgo(props.incident().created_at)}
+          {`#${props.incident().number}   ${props.incident().service_name ?? ""}   ${timeAgo(props.incident().created_at)}`}
         </Text>
         <View class="flex-1" />
         <Pill label={props.incident().status} color={STATUS_COLOR[props.incident().status]} />

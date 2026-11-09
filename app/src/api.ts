@@ -61,7 +61,7 @@ export interface OnCall {
 
 export interface ContactMethod {
   id: string;
-  type: "tuya" | "ntfy" | "webhook" | "slack";
+  type: "tuya" | "ntfy" | "webhook" | "slack" | "webpush";
   label: string;
   config: Record<string, unknown>;
   min_severity: Severity;
@@ -93,6 +93,14 @@ export interface ScheduleDef {
   id: string;
   name: string;
   rotation: { start: number; shift_hours: number; users: string[] };
+}
+
+export interface UsageToday {
+  requests: number;
+  rowsRead: number;
+  rowsWritten: number;
+  free: { requests: number; rowsRead: number; rowsWritten: number };
+  pressure: "ok" | "lean" | "shed";
 }
 
 export interface Session {
@@ -150,7 +158,10 @@ export class Api {
   deleteContactMethod = (id: string) => this.call<void>("DELETE", `/contact-methods/${id}`);
   testContactMethod = (id: string) => this.call<{ ok: true }>("POST", `/contact-methods/${id}/test`);
 
+  pushKey = () => this.call<{ publicKey: string }>("GET", "/push/vapid");
+
   // ---- admin
+  usage = () => this.call<UsageToday>("GET", "/usage");
   users = () => this.call<{ users: User[] }>("GET", "/users");
   addUser = (u: { email: string; name: string; role: "admin" | "responder" }) =>
     this.call<{ user_id: string; token: string }>("POST", "/users", u);

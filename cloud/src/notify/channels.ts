@@ -31,6 +31,9 @@ export function headline(incident: Incident, event: NotifyEvent): string {
   return `[${verb[event]}] #${incident.number} ${incident.title}`;
 }
 
+/** A hung endpoint must not hold up the other pages in this pass. */
+const timeout = () => AbortSignal.timeout(15_000);
+
 async function check(res: Response, what: string) {
   if (!res.ok) throw new Error(`${what}: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
 }
@@ -51,11 +54,12 @@ export async function sendNtfy(env: Env, cfg: NtfyConfig, incident: Incident, us
     ].join("; ");
   }
   if (cfg.token) headers.Authorization = `Bearer ${cfg.token}`;
-  const body = [incident.service_name, incident.source, `severity: ${incident.severity}`].filter(Boolean).join(" · ");
+  const body = [incident.service_name, incident.source, `severity: ${incident.severity}`].filter(Boolean).join("  ");
   const res = await fetch(`${(cfg.server || "https://ntfy.sh").replace(/\/$/, "")}/${encodeURIComponent(cfg.topic)}`, {
     method: "POST",
     headers,
     body,
+    signal: timeout(),
   });
   await check(res, "ntfy");
 }
@@ -76,20 +80,22 @@ export async function sendWebhook(env: Env, cfg: WebhookConfig, incident: Incide
         resolve: event !== "resolve" ? await actionUrl(env, incident.id, userId, "resolve") : undefined,
       },
     }),
+    signal: timeout(),
   });
   await check(res, "webhook");
 }
 
 export async function sendSlack(env: Env, cfg: SlackConfig, incident: Incident, userId: string, event: NotifyEvent) {
   const icon = event === "trigger" ? (incident.severity === "critical" ? ":rotating_light:" : ":warning:") : ":white_check_mark:";
-  const ack = event === "trigger" ? ` · <${await actionUrl(env, incident.id, userId, "ack")}|Acknowledge>` : "";
+  const ack = event === "trigger" ? `  <${await actionUrl(env, incident.id, userId, "ack")}|Acknowledge>` : "";
   const res = await fetch(cfg.webhook_url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      text: `${icon} *${headline(incident, event)}*\n${incident.service_name ?? ""} · ${incident.severity}` +
-        ` · <${env.PUBLIC_URL}/app/#/incidents/${incident.id}|Open>${ack}`,
+      text: `${icon} *${headline(incident, event)}*\n${incident.service_name ?? ""}  ${incident.severity}` +
+        `  <${env.PUBLIC_URL}/app/#/incidents/${incident.id}|Open>${ack}`,
     }),
+    signal: timeout(),
   });
   await check(res, "slack");
 }

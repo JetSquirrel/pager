@@ -2,7 +2,7 @@
 import { batch, computed, effect, signal, Storage } from "nsh";
 import { isAvailable as hasWindow, Window } from "nsh/desktop";
 import { Api, type Incident, type Session, type User } from "./api";
-import { incidentFromHash, notify, pageInfo, requestNotifications } from "./host";
+import { incidentFromHash, notify, onOpen, pageInfo, requestNotifications } from "./host";
 import { toast } from "./toast";
 
 const SESSION_KEY = "pager.session";
@@ -29,6 +29,7 @@ export const acknowledged = computed(() => incidents().filter((i) => i.status ==
 export async function boot() {
   const page = await pageInfo();
   deepLink.set(incidentFromHash(page?.hash));
+  onOpen((hash) => deepLink.set(incidentFromHash(hash)));
   const saved = await Storage.getItem(SESSION_KEY);
   if (saved) {
     try {
@@ -123,7 +124,7 @@ function connect() {
       toast(`#${msg.incident.number} ${msg.incident.title}`, msg.incident.severity);
       notify({
         title: `#${msg.incident.number} ${msg.incident.title}`,
-        body: [msg.incident.service_name, msg.incident.severity].filter(Boolean).join(" · "),
+        body: [msg.incident.service_name, msg.incident.severity].filter(Boolean).join("  "),
         tag: msg.incident.id,
         severity: msg.incident.severity,
       });

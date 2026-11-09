@@ -1,10 +1,11 @@
-import { DurableObject } from "cloudflare:workers";
+// Escalation: one row per incident in `escalations`, walked by the Durable Object's single alarm.
 import { addEvent, broadcast, getIncident, notifyUsers } from "./incidents";
 import { onCallAt } from "./oncall";
 import type { EscalationPolicy, EscalationTarget, Env, Override, Rotation } from "./types";
 import { now, parseJson } from "./util";
 
 const MINUTE = 60_000;
+const RETRY_FAILED_STEP_MS = 30_000;
 
 /** Turns escalation targets into user ids: users as they are, schedules into whoever is on call at `at`. */
 export async function resolveTargets(env: Env, targets: EscalationTarget[], at = now()): Promise<string[]> {
@@ -49,84 +50,85 @@ export function planStep(policy: EscalationPolicy, step: number): { policyStep: 
   return { policyStep, nextDelayMs: Math.max(1, next.delay_min) * MINUTE };
 }
 
-/**
- * One instance per incident (idFromName(incident id)). It pages step 0 when the incident opens and,
- * while the incident stays triggered, walks the escalation policy on Durable Object alarms.
- * Ack and resolve call stop(), which clears the alarm.
- */
-export class Escalator extends DurableObject<Env> {
-  async start(incidentId: string): Promise<void> {
-    if (await this.ctx.storage.get("incidentId")) return; // already running
-    await this.ctx.storage.put({ incidentId, step: -1 });
-    await this.advance();
-  }
+/** Opens the escalation and pages step 0, in the same turn that created the incident. */
+export async function startEscalation(env: Env, incidentId: string): Promise<void> {
+  await env.DB.prepare(`INSERT OR IGNORE INTO escalations (incident_id, step, next_at) VALUES (?, -1, ?)`).bind(incidentId, now()).run();
+  await advance(env, incidentId);
+}
 
-  async stop(): Promise<void> {
-    await this.ctx.storage.deleteAlarm();
-    await this.ctx.storage.put("stopped", true);
-  }
+export async function stopEscalation(env: Env, incidentId: string): Promise<void> {
+  await env.DB.prepare(`UPDATE escalations SET stopped = 1, next_at = NULL WHERE incident_id = ?`).bind(incidentId).run();
+}
 
-  /** Re-pages the current step now (the "page again" button). */
-  async repage(): Promise<void> {
-    const step = (await this.ctx.storage.get<number>("step")) ?? 0;
-    await this.ctx.storage.put("step", step - 1);
-    await this.ctx.storage.delete("stopped");
-    await this.advance();
-  }
+/** Pages the current step again (the "page again" button) and restarts its timer. */
+export async function repage(env: Env, incidentId: string): Promise<void> {
+  await env.DB.prepare(`UPDATE escalations SET step = step - 1, stopped = 0 WHERE incident_id = ?`).bind(incidentId).run();
+  await advance(env, incidentId);
+}
 
-  async status(): Promise<{ step: number; nextAt: number | null; stopped: boolean }> {
-    return {
-      step: (await this.ctx.storage.get<number>("step")) ?? -1,
-      nextAt: await this.ctx.storage.getAlarm(),
-      stopped: !!(await this.ctx.storage.get("stopped")),
-    };
-  }
+export async function escalationStatus(env: Env, incidentId: string): Promise<{ step: number; nextAt: number | null; stopped: boolean }> {
+  const r = await env.DB.prepare(`SELECT step, next_at, stopped FROM escalations WHERE incident_id = ?`)
+    .bind(incidentId)
+    .first<{ step: number; next_at: number | null; stopped: number }>();
+  return { step: r?.step ?? -1, nextAt: r?.next_at ?? null, stopped: !!r?.stopped };
+}
 
-  async alarm(): Promise<void> {
-    await this.advance();
-  }
-
-  private async advance(): Promise<void> {
-    const incidentId = await this.ctx.storage.get<string>("incidentId");
-    if (!incidentId || (await this.ctx.storage.get("stopped"))) return;
-    const incident = await getIncident(this.env, incidentId);
-    if (!incident || incident.status !== "triggered") {
-      await this.ctx.storage.put("stopped", true);
-      return;
+/** Runs the steps that have come due. A step that throws is tried again shortly, without holding up the others. */
+export async function dueEscalations(env: Env, at: number): Promise<void> {
+  const { results } = await env.DB.prepare(`SELECT incident_id FROM escalations WHERE next_at IS NOT NULL AND next_at <= ? ORDER BY next_at LIMIT 50`)
+    .bind(at)
+    .all<{ incident_id: string }>();
+  for (const { incident_id } of results) {
+    try {
+      await advance(env, incident_id);
+    } catch (e) {
+      console.error("escalation failed", incident_id, e);
+      await env.DB.prepare(`UPDATE escalations SET next_at = ? WHERE incident_id = ?`).bind(at + RETRY_FAILED_STEP_MS, incident_id).run();
     }
-    const policy = await loadPolicyForIncident(this.env, incidentId);
-    if (!policy || policy.steps.length === 0) {
-      await addEvent(this.env, incidentId, "escalation_failed", { message: "Service has no escalation steps" }).run();
-      return;
-    }
+  }
+}
 
-    const step = ((await this.ctx.storage.get<number>("step")) ?? -1) + 1;
-    const { policyStep, nextDelayMs } = planStep(policy, step);
-    const users = await resolveTargets(this.env, policy.steps[policyStep].targets);
-    const assignees = [...new Set([...incident.assignees, ...users])];
-    const t = now();
+async function advance(env: Env, incidentId: string): Promise<void> {
+  const esc = await env.DB.prepare(`SELECT step, stopped FROM escalations WHERE incident_id = ?`)
+    .bind(incidentId)
+    .first<{ step: number; stopped: number }>();
+  if (!esc || esc.stopped) return;
 
-    await this.env.DB.batch([
-      this.env.DB.prepare(`UPDATE incidents SET escalation_step = ?, assignees = ?, updated_at = ? WHERE id = ?`).bind(
-        step,
-        JSON.stringify(assignees),
-        t,
-        incidentId,
-      ),
-      addEvent(this.env, incidentId, step === 0 ? "notified" : "escalated", {
-        message:
-          users.length === 0
-            ? `Step ${policyStep + 1}: nobody to page (empty schedule?)`
-            : `Step ${policyStep + 1}${step >= policy.steps.length ? ` (repeat ${Math.floor(step / policy.steps.length)})` : ""}`,
-        data: { step, policy_step: policyStep, users },
-        at: t,
-      }),
+  const incident = await getIncident(env, incidentId);
+  if (!incident || incident.status !== "triggered") {
+    await stopEscalation(env, incidentId);
+    return;
+  }
+  const policy = await loadPolicyForIncident(env, incidentId);
+  if (!policy || policy.steps.length === 0) {
+    await env.DB.batch([
+      addEvent(env, incidentId, "escalation_failed", { message: "Service has no escalation steps" }),
+      env.DB.prepare(`UPDATE escalations SET next_at = NULL WHERE incident_id = ?`).bind(incidentId),
     ]);
-    await this.ctx.storage.put("step", step);
-    if (nextDelayMs != null) await this.ctx.storage.setAlarm(t + nextDelayMs);
-
-    const updated = { ...incident, escalation_step: step, assignees, updated_at: t };
-    await notifyUsers(this.env, updated, users, "trigger");
-    if (step > 0) await broadcast(this.env, "incident.updated", updated);
+    return;
   }
+
+  const step = esc.step + 1;
+  const { policyStep, nextDelayMs } = planStep(policy, step);
+  const users = await resolveTargets(env, policy.steps[policyStep].targets);
+  const assignees = [...new Set([...incident.assignees, ...users])];
+  const t = now();
+
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE incidents SET escalation_step = ?, assignees = ?, updated_at = ? WHERE id = ?`).bind(step, JSON.stringify(assignees), t, incidentId),
+    env.DB.prepare(`UPDATE escalations SET step = ?, next_at = ? WHERE incident_id = ?`).bind(step, nextDelayMs == null ? null : t + nextDelayMs, incidentId),
+    addEvent(env, incidentId, step === 0 ? "notified" : "escalated", {
+      message:
+        users.length === 0
+          ? `Step ${policyStep + 1}: nobody to page (empty schedule?)`
+          : `Step ${policyStep + 1}${step >= policy.steps.length ? ` (repeat ${Math.floor(step / policy.steps.length)})` : ""}`,
+      data: { step, policy_step: policyStep, users },
+      at: t,
+    }),
+  ]);
+
+  const updated = { ...incident, escalation_step: step, assignees, updated_at: t };
+  await notifyUsers(env, updated, users, "trigger");
+  env.wake();
+  if (step > 0) await broadcast(env, "incident.updated", updated);
 }

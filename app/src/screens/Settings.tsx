@@ -1,6 +1,7 @@
 import { resource, Scroll, signal, Text, View } from "nsh";
 import { AlertDialog, Input, Switch, Tab, Tabs } from "nsh/base";
 import type { ContactMethod, Severity } from "../api";
+import { pushEnable, pushState } from "../host";
 import { api, me, session, signOut } from "../store";
 import { toast } from "../toast";
 import { Btn, SectionTitle } from "../ui";
@@ -27,6 +28,8 @@ function describe(cm: ContactMethod): string {
       return `device ${c.device_id}`;
     case "slack":
       return "Slack webhook";
+    case "webpush":
+      return "Notifications on this browser, even when Pager is closed";
     default:
       return c.url ?? "";
   }
@@ -68,7 +71,7 @@ function MethodRow(props: { cm: () => ContactMethod; reload: () => void }) {
         <View class="flex-1">
           <Text class="font-semibold text-card-foreground">{props.cm().label || props.cm().type}</Text>
           <Text class="text-sm text-muted-foreground" numberOfLines={1}>
-            {props.cm().type} · {describe(props.cm())}
+            {describe(props.cm())}
           </Text>
         </View>
       </Switch>
@@ -153,6 +156,38 @@ function AddMethod(props: { presets: string[]; onAdded: () => void }) {
   );
 }
 
+/** Web only: page this browser or home-screen app while Pager is closed. Gone once it is on, its row takes over. */
+function ThisDevice(props: { methods: ContactMethod[]; onAdded: () => void }) {
+  const state = resource(pushState);
+  const busy = signal(false);
+  const paged = () => props.methods.some((m) => m.type === "webpush" && m.config.endpoint === state()?.endpoint);
+  const enable = async () => {
+    busy.set(true);
+    try {
+      const sub = await pushEnable((await api().pushKey()).publicKey);
+      if (!sub) throw new Error("This browser did not answer.");
+      if ("error" in sub) throw new Error(sub.error);
+      await api().addContactMethod({ type: "webpush", label: sub.label, config: { endpoint: sub.endpoint, keys: sub.keys } });
+      await state.refetch();
+      props.onAdded();
+    } catch (e) {
+      toast(String((e as Error).message ?? e), "error");
+    } finally {
+      busy.set(false);
+    }
+  };
+  return (
+    <If when={state()?.supported && !(state()?.endpoint && paged())}>
+      <If
+        when={!state()?.ios || state()?.standalone}
+        else={<Text class="px-1 text-muted-foreground">To be paged on this iPhone, add Pager to the Home Screen and open it from there.</Text>}
+      >
+        <Btn title={busy() ? "Turning on…" : "Page me on this device"} disabled={busy()} onPress={enable} />
+      </If>
+    </If>
+  );
+}
+
 export function Settings() {
   const methods = resource(async () => api().contactMethods());
   return (
@@ -161,7 +196,7 @@ export function Settings() {
         <View class="gap-1 rounded-xl border border-border bg-card p-4">
           <Text class="text-lg font-semibold text-card-foreground">{me()?.name}</Text>
           <Text class="text-muted-foreground">
-            {me()?.email} · {me()?.role}
+            {`${me()?.email}   ${me()?.role}`}
           </Text>
           <Text class="text-sm text-muted-foreground">{session()?.server}</Text>
         </View>
@@ -175,6 +210,7 @@ export function Settings() {
                   {(c) => <MethodRow cm={c} reload={() => methods.refetch()} />}
                 </Each>
               </If>
+              <ThisDevice methods={m().contact_methods} onAdded={() => methods.refetch()} />
               <SectionTitle title="Add" />
               <AddMethod presets={m().tuya_presets} onAdded={() => methods.refetch()} />
             </>
