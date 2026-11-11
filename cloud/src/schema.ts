@@ -173,4 +173,9 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX customer_notices_incident ON customer_notices (incident_id, created_at);
   CREATE INDEX customer_notices_at ON customer_notices (created_at);
   `,
+  `
+  -- A test ring in progress: the board rings until this time, and the alarm clears it.
+  ALTER TABLE devices ADD COLUMN test_until INTEGER;
+  CREATE INDEX devices_test ON devices (test_until) WHERE test_until IS NOT NULL;
+  `,
 ];

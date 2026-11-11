@@ -205,6 +205,7 @@ export class Api {
   hardwarePagers = () => this.call<{ devices: HardwarePager[] }>("GET", "/devices");
   addHardwarePager = (name: string) => this.call<{ id: string; token: string }>("POST", "/devices", { name });
   deleteHardwarePager = (id: string) => this.call<void>("DELETE", `/devices/${id}`);
+  testHardwarePager = (id: string) => this.call<{ ringing_ms: number }>("POST", `/devices/${id}/test`);
 
   pushKey = () => this.call<{ publicKey: string }>("GET", "/push/vapid");
 

@@ -38,7 +38,9 @@ async function pushState() {
 
 async function pushEnable({ publicKey }) {
   if (!pushSupported()) return { error: "This browser cannot receive push notifications." };
-  if ((await Notification.requestPermission()) !== "granted") return { error: "Notifications are blocked for this site." };
+  const permission = await Notification.requestPermission();
+  if (permission === "denied") return { error: "Notifications are blocked for this site. Allow them in the browser's site settings, then try again." };
+  if (permission !== "granted") return { error: "The browser's prompt closed without an answer. Try again and choose Allow." };
   try {
     await navigator.serviceWorker.register(new URL("sw.js", location.href).href, { scope: "./" });
     const reg = await navigator.serviceWorker.ready;

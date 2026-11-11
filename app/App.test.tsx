@@ -409,6 +409,80 @@ test("the alarm check says what would stop a page", async () => {
   await app.waitFor("id:alarm-browser >> This browser blocks alarms: allow notifications for this site");
 });
 
+test("Alarm check counts a connected board and names one that is not", async () => {
+  const app = await open("App.tsx", {
+    storage: signedIn,
+    network: api({
+      [`GET ${SERVER}/v1/contact-methods`]: { body: { contact_methods: [], tuya_presets: [] } },
+      [`GET ${SERVER}/v1/devices`]: {
+        body: {
+          devices: [
+            { id: "dev_1", name: "Desk pager", last_seen_at: Date.now() - 60_000, last_ip: null, firmware: "pager-t5ai/0.2.1", created_at: 1 },
+            { id: "dev_2", name: "Attic pager", last_seen_at: Date.now() - 60 * 60_000, last_ip: null, firmware: null, created_at: 2 },
+          ],
+        },
+      },
+    }),
+  });
+  await app.press("Settings");
+  await app.waitFor("id:alarm-reach >> Critical pages ring 1 hardware pager");
+  await app.waitFor("id:alarm-board-offline >> Attic pager: not connected, it will not ring");
+  expect(app.shows("Critical pages reach nothing while the app is closed")).toBe(false);
+});
+
+test("sends a test ring to a connected board, and offers none for a gone one", async () => {
+  let tested = 0;
+  const app = await open("App.tsx", {
+    storage: signedIn,
+    network: api({
+      [`GET ${SERVER}/v1/contact-methods`]: { body: { contact_methods: [], tuya_presets: [] } },
+      [`GET ${SERVER}/v1/devices`]: {
+        body: {
+          devices: [
+            { id: "dev_1", name: "Desk pager", last_seen_at: Date.now() - 60_000, last_ip: null, firmware: null, created_at: 1 },
+            { id: "dev_2", name: "Attic pager", last_seen_at: Date.now() - 60 * 60_000, last_ip: null, firmware: null, created_at: 2 },
+          ],
+        },
+      },
+      [`POST ${SERVER}/v1/devices/dev_1/test`]: () => {
+        tested++;
+        return { body: { ringing_ms: 10_000 } };
+      },
+    }),
+  });
+  await app.press("Settings");
+  await app.waitFor("id:test-board-dev_1");
+  expect(app.shows("id:test-board-dev_2")).toBe(false);
+  await app.press("id:test-board-dev_1");
+  await app.waitFor("Test ring sent to Desk pager");
+  expect(tested).toBe(1);
+});
+
+test("Alarm check follows the browser's answer when turning on push fails", async () => {
+  let permission = "default";
+  const app = await open("App.tsx", {
+    storage: signedIn,
+    network: api({
+      [`GET ${SERVER}/v1/contact-methods`]: { body: { contact_methods: [], tuya_presets: [] } },
+      [`GET ${SERVER}/v1/devices`]: { body: { devices: [] } },
+      [`GET ${SERVER}/v1/push/vapid`]: { body: { publicKey: "k" } },
+    }),
+    host: {
+      handlers: {
+        pushState: () => ({ supported: true, ios: false, standalone: false, endpoint: null, permission }),
+        pushEnable: () => {
+          permission = "denied";
+          return { error: "Notifications are blocked for this site." };
+        },
+      },
+    },
+  });
+  await app.press("Settings");
+  await app.waitFor("id:alarm-browser >> This browser has not been asked yet");
+  await app.press("Page me on this device");
+  await app.waitFor("id:alarm-browser >> This browser blocks alarms: allow notifications for this site");
+});
+
 test("picks a Tuya device from the list, and adds it on Auto", async () => {
   const added: unknown[] = [];
   const app = await open("App.tsx", {

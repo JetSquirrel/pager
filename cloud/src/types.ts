@@ -26,7 +26,7 @@ export interface Env extends Omit<Bindings, "PUBLIC_URL"> {
   wake(): void;
   publish(message: string): void;
   acceptClient(userId: string): Response;
-  acceptDevice(userId: string, state: unknown): Response;
+  acceptDevice(userId: string, state: unknown, deviceId: string): Response;
   version(): number;
   pressure(): Pressure;
   usageToday(): Usage;

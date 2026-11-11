@@ -95,7 +95,13 @@ board chirps once a minute; `pager_clear` on the serial console forgets the serv
 The settings console is the board's user UART at 115200 baud (the lower-numbered of its two USB ports on the T5AI-Core);
 the other port carries the chip's log at 460800. The board has 2.4 GHz Wi-Fi only.
 
+**Settings → Hardware pagers → Send test** rings a connected board for 10 seconds through the same state a real page
+uses, and the button stops it early. It never changes or mutes a real page.
+
 ### Checking the speaker
+
+Plug the speaker into the **SPK** connector. The **BAT** connector next to the USB port is for a battery and carries
+charging voltage.
 
 `pager_audio` on the serial console plays a 1 kHz tone for about 4 seconds and answers whether the microphone heard it.
 It listens to the room, to the tone with the amplifier off, then to the tone with the amplifier on (GPIO39 high), and

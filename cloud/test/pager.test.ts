@@ -457,6 +457,45 @@ describe("hardware pagers", () => {
     expect((await h.call("GET", "/v1/device/state", { device })).json).toMatchObject({ alert: 0, acked: 1 });
   });
 
+  it("a test press rings only that board, and the alarm stops it", async () => {
+    const { T, B } = await seed(h);
+    const desk = (await h.call("POST", "/v1/devices", { token: T, body: { name: "Desk" } })).json;
+    const attic = (await h.call("POST", "/v1/devices", { token: T, body: { name: "Attic" } })).json;
+    expect((await h.call("POST", `/v1/devices/${desk.id}/test`, { token: T })).status).toBe(409); // never connected
+
+    const before = (await h.call("GET", "/v1/device/state", { device: desk.token })).json;
+    await h.call("GET", "/v1/device/state", { device: attic.token });
+    expect((await h.call("POST", `/v1/devices/${desk.id}/test`, { token: B })).status).toBe(404); // someone else's
+
+    expect((await h.call("POST", `/v1/devices/${desk.id}/test`, { token: T })).json).toEqual({ ringing_ms: 10_000 });
+    const ringing = (await h.call("GET", "/v1/device/state", { device: desk.token })).json;
+    expect(ringing).toMatchObject({ alert: 1, count: 0, top: { title: "Test ring", severity: "critical" } });
+    expect(ringing.v).toBeGreaterThan(before.v); // wakes a long poll already waiting
+    expect((await h.call("GET", "/v1/device/state", { device: attic.token })).json).toMatchObject({ alert: 0, top: null });
+
+    // A second press during the ring neither moves the end nor writes.
+    const end = h.alarmAt();
+    vi.setSystemTime(Date.now() + 5_000);
+    await h.call("POST", `/v1/devices/${desk.id}/test`, { token: T });
+    expect(h.alarmAt()).toBe(end);
+
+    vi.setSystemTime(Date.now() + 5_000);
+    await h.alarms();
+    const quiet = (await h.call("GET", "/v1/device/state", { device: desk.token })).json;
+    expect(quiet).toMatchObject({ alert: 0, top: null });
+    expect(quiet.v).toBeGreaterThan(ringing.v);
+  });
+
+  it("a real page replaces a test ring and counts as new", async () => {
+    const { T, key } = await seed(h);
+    const desk = (await h.call("POST", "/v1/devices", { token: T, body: { name: "Desk" } })).json;
+    await h.call("GET", "/v1/device/state", { device: desk.token });
+    await h.call("POST", `/v1/devices/${desk.id}/test`, { token: T });
+    await fire(key);
+    // count going from 0 to 1 is what clears a mute on the board.
+    expect((await h.call("GET", "/v1/device/state", { device: desk.token })).json).toMatchObject({ alert: 1, count: 1, top: { title: "Disk 95% on db1" } });
+  });
+
   it("rejects an unknown device", async () => {
     await seed(h);
     expect((await h.call("GET", "/v1/device/state", { device: "nope" })).status).toBe(401);

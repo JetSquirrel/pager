@@ -23,6 +23,12 @@ const DELAYS = [0, 2, 5, 10, 15];
 /** A board writes last_seen every five minutes while it is polling. */
 const boardOnline = (d: HardwarePager) => d.last_seen_at !== null && Date.now() - d.last_seen_at < 11 * 60_000;
 
+/** Read once and shared, so a section that changes one of these updates the others. */
+const loadBoards = () => resource(async () => api().hardwarePagers());
+const loadPush = () => resource(pushState);
+type Boards = ReturnType<typeof loadBoards>;
+type Push = ReturnType<typeof loadPush>;
+
 const delayLabel = (min: number) => (min ? `After ${min} min` : "At once");
 
 function describe(cm: ContactMethod): string {
@@ -188,8 +194,8 @@ function AddMethod(props: { open: boolean; onClose: () => void; presets: string[
 }
 
 /** Web only: page this browser or home-screen app while Pager is closed. Gone once it is on, its row takes over. */
-function ThisDevice(props: { methods: ContactMethod[]; onAdded: () => void }) {
-  const state = resource(pushState);
+function ThisDevice(props: { methods: ContactMethod[]; push: Push; onAdded: () => void }) {
+  const state = props.push;
   const busy = signal(false);
   const paged = () => props.methods.some((m) => m.type === "webpush" && m.config.endpoint === state()?.endpoint);
   const enable = async () => {
@@ -203,6 +209,8 @@ function ThisDevice(props: { methods: ContactMethod[]; onAdded: () => void }) {
       props.onAdded();
     } catch (e) {
       toast(String((e as Error).message ?? e), "error");
+      // The browser's answer may have changed the permission Alarm check is showing.
+      state.refetch();
     } finally {
       busy.set(false);
     }
@@ -219,23 +227,37 @@ function ThisDevice(props: { methods: ContactMethod[]; onAdded: () => void }) {
 }
 
 /** Would a critical page get through right now? Everything here is something the person can fix. */
-function AlarmCheck(props: { methods: ContactMethod[] }) {
-  const browser = resource(pushState);
+function AlarmCheck(props: { methods: ContactMethod[]; boards: Boards; push: Push }) {
+  const browser = props.push;
   const live = () => props.methods.filter((m) => m.enabled);
   const failing = () => live().filter((m) => m.last_error);
-  const count = () => `${live().length} ${live().length === 1 ? "method" : "methods"}`;
+  const devices = () => props.boards()?.devices ?? [];
+  const online = () => devices().filter(boardOnline);
+  const offline = () => devices().filter((d) => !boardOnline(d));
+  const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+  const reach = () =>
+    [
+      ...(live().length ? [plural(live().length, "method", "methods")] : []),
+      ...(online().length ? [plural(online().length, "hardware pager", "hardware pagers")] : []),
+    ].join(" and ");
   const permission = () => browser()?.permission;
   return (
     <Section title="Alarm check">
       <Surface>
         <Row testID="alarm-reach">
-          <Dot tone={live().length ? "ok" : "critical"} />
-          <Text class="flex-1 text-sm text-card-foreground">{live().length ? `Critical pages ring ${count()}` : "Critical pages reach nothing while the app is closed"}</Text>
+          <Dot tone={reach() ? "ok" : "critical"} />
+          <Text class="flex-1 text-sm text-card-foreground">{reach() ? `Critical pages ring ${reach()}` : "Critical pages reach nothing while the app is closed"}</Text>
         </Row>
         {failing().map((m) => (
           <Row testID="alarm-failing">
             <Dot tone="critical" />
             <Text class="flex-1 text-sm text-card-foreground">{`${m.label || m.type}: last delivery failed`}</Text>
+          </Row>
+        ))}
+        {offline().map((d) => (
+          <Row testID="alarm-board-offline">
+            <Dot tone="critical" />
+            <Text class="flex-1 text-sm text-card-foreground">{`${d.name}: not connected, it will not ring`}</Text>
           </Row>
         ))}
         <If when={permission() && permission() !== "unsupported"}>
@@ -264,8 +286,8 @@ function AlarmCheck(props: { methods: ContactMethod[] }) {
 }
 
 /** T5AI boards that ring on their own: their token is shown once, to type into the serial console. */
-function HardwarePagers() {
-  const list = resource(async () => api().hardwarePagers());
+function HardwarePagers(props: { list: Boards }) {
+  const list = props.list;
   const issued = signal<string | null>(null);
   const busy = signal(false);
   const add = async () => {
@@ -280,6 +302,7 @@ function HardwarePagers() {
     }
   };
   const remove = (d: HardwarePager) => api().deleteHardwarePager(d.id).then(() => list.refetch(), (e) => toast(String(e.message ?? e), "error"));
+  const test = (d: HardwarePager) => api().testHardwarePager(d.id).then(() => toast(`Test ring sent to ${d.name}`), (e) => toast(String(e.message ?? e), "error"));
   return (
     <Section title="Hardware pagers" count={list()?.devices.length} right={<Btn title="Add" testID="add-board" variant="ghost" icon="plus" busy={busy()} onPress={add} />}>
       <View class="gap-2">
@@ -303,6 +326,9 @@ function HardwarePagers() {
                   <Text class="text-sm font-medium text-card-foreground" numberOfLines={1}>{d.name}</Text>
                   <Meta>{boardOnline(d) ? "Online" : d.last_seen_at ? `Last seen ${timeAgo(d.last_seen_at)}` : "Never connected"}{d.firmware ? `  ${d.firmware}` : ""}</Meta>
                 </View>
+                <If when={boardOnline(d)}>
+                  <Btn title="Send test" testID={`test-board-${d.id}`} variant="ghost" onPress={() => test(d)} />
+                </If>
                 <IconBtn icon="trash" label={`Remove ${d.name}`} onPress={() => remove(d)} />
               </Row>
             ))}
@@ -315,6 +341,8 @@ function HardwarePagers() {
 
 export function Settings() {
   const methods = resource(async () => api().contactMethods());
+  const boards = loadBoards();
+  const push = loadPush();
   const adding = signal(false);
   return (
     <Page>
@@ -336,7 +364,8 @@ export function Settings() {
         </Surface>
       </Section>
 
-      <If when={methods()}>{(m) => <AlarmCheck methods={m().contact_methods} />}</If>
+      {/* Waits for the boards too: until they load, a board-only setup would flash "reach nothing". */}
+      <If when={methods() && (boards() || boards.error())}>{() => <AlarmCheck methods={methods()!.contact_methods} boards={boards} push={push} />}</If>
 
       <Section title="How you get paged" right={<Btn title="Add" testID="add-method" variant="ghost" icon="plus" onPress={() => adding.set(true)} />}>
         <If when={methods()} else={methods.error() ? <Failed error={methods.error()} onRetry={() => methods.refetch()} /> : <Loading />}>
@@ -349,14 +378,14 @@ export function Settings() {
                   </Each>
                 </Surface>
               </If>
-              <ThisDevice methods={m().contact_methods} onAdded={() => methods.refetch()} />
+              <ThisDevice methods={m().contact_methods} push={push} onAdded={() => methods.refetch()} />
               <AddMethod open={adding()} onClose={() => adding.set(false)} presets={m().tuya_presets} onAdded={() => methods.refetch()} />
             </View>
           )}
         </If>
       </Section>
 
-      <HardwarePagers />
+      <HardwarePagers list={boards} />
     </Page>
   );
 }

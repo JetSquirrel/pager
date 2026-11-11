@@ -27,13 +27,29 @@ export interface DeviceState {
 
 const SEV_ORDER = { critical: 3, error: 2, warning: 1, info: 0 } as const;
 
+/** How long a test ring lasts unless the board's button stops it first. */
+export const TEST_RING_MS = 10_000;
+/** Matches the app: a polling board writes last_seen every five minutes, so two misses and a margin means it is gone. */
+const BOARD_ONLINE_MS = 11 * 60_000;
+
 /** What a user's device should show now. Pure function of the user's open incidents (tested). */
-export function deviceStateFor(userId: string, open: Incident[], v: number, at = now()): DeviceState {
+export function deviceStateFor(userId: string, open: Incident[], v: number, at = now(), testing = false): DeviceState {
   const mine = open.filter((i) => i.assignees.includes(userId));
   const triggered = mine
     .filter((i) => i.status === "triggered")
     .sort((a, b) => SEV_ORDER[b.severity] - SEV_ORDER[a.severity] || b.created_at - a.created_at);
   const t = triggered[0];
+  // A real page always wins. count stays 0 so a real page arriving mid-test counts as new and clears a button mute.
+  if (testing && !t) {
+    return {
+      v,
+      alert: 1,
+      count: 0,
+      acked: mine.filter((i) => i.status === "acknowledged").length,
+      top: { id: "test", number: 0, title: "Test ring", severity: "critical", service: "Pager" },
+      now: at,
+    };
+  }
   return {
     v,
     alert: triggered.length ? 1 : 0,
@@ -54,7 +70,21 @@ export function openIncidents(db: Db): Incident[] {
     .rows.map(rowToIncident);
 }
 
-type DeviceRow = { id: string; user_id: string; name: string; last_seen_at: number | null };
+export function testingDevices(db: Db, at: number): Set<string> {
+  return new Set(db.execute("SELECT id FROM devices WHERE test_until > ?", [at]).rows.map((r) => r.id as string));
+}
+
+export function nextDeviceTest(db: Db): number | null {
+  return db.execute("SELECT MIN(test_until) AS at FROM devices WHERE test_until IS NOT NULL", []).rows[0]?.at as number | null;
+}
+
+/** Runs from the alarm: tells the boards whose test is over to stop. */
+export function endDeviceTests(env: Env, at: number): void {
+  const { written } = env.DB.execute("UPDATE devices SET test_until = NULL WHERE test_until <= ?", [at]);
+  if (written) env.publish(JSON.stringify({ type: "device.test" }));
+}
+
+type DeviceRow = { id: string; user_id: string; name: string; last_seen_at: number | null; test_until: number | null };
 type DeviceEnv = { Bindings: Env; Variables: { device: DeviceRow; user: User } };
 
 // ------------------------------------------------------------------ the device's own API
@@ -65,7 +95,7 @@ deviceApi.use("*", async (c, next) => {
   const h = c.req.header("authorization") ?? "";
   const token = h.toLowerCase().startsWith("device ") ? h.slice(7).trim() : null;
   if (!token) throw new HttpError(401, "missing device token");
-  const device = await c.env.DB.prepare(`SELECT id, user_id, name, last_seen_at FROM devices WHERE token_hash = ?`)
+  const device = await c.env.DB.prepare(`SELECT id, user_id, name, last_seen_at, test_until FROM devices WHERE token_hash = ?`)
     .bind(await sha256Hex(token))
     .first<DeviceRow>();
   if (!device) throw new HttpError(401, "unknown device");
@@ -85,8 +115,8 @@ deviceApi.get("/state", async (c) => {
       .bind(now(), c.req.header("cf-connecting-ip") ?? null, c.req.header("x-firmware") ?? null, d.id)
       .run();
   }
-  const state = deviceStateFor(d.user_id, openIncidents(c.env.DB), c.env.version());
-  if (c.req.header("upgrade")?.toLowerCase() === "websocket") return c.env.acceptDevice(d.user_id, state);
+  const state = deviceStateFor(d.user_id, openIncidents(c.env.DB), c.env.version(), now(), (d.test_until ?? 0) > now());
+  if (c.req.header("upgrade")?.toLowerCase() === "websocket") return c.env.acceptDevice(d.user_id, state, d.id);
   return c.json(state);
 });
 
@@ -131,6 +161,24 @@ devicesAdmin.post("/", async (c) => {
     .bind(id, c.get("user").id, (b.name || "T5AI pager").slice(0, 60), await sha256Hex(token), now())
     .run();
   return c.json({ id, token }, 201);
+});
+
+/**
+ * Rings the owner's board for a few seconds, through the same state a real page uses, so it proves the whole path.
+ * Costs only when someone presses the button; a second press during a ring writes nothing.
+ */
+devicesAdmin.post("/:id/test", async (c) => {
+  const d = await c.env.DB.prepare(`SELECT id, last_seen_at, test_until FROM devices WHERE id = ? AND user_id = ?`)
+    .bind(c.req.param("id"), c.get("user").id)
+    .first<Pick<DeviceRow, "id" | "last_seen_at" | "test_until">>();
+  if (!d) throw new HttpError(404, "no such pager");
+  if (d.last_seen_at === null || now() - d.last_seen_at >= BOARD_ONLINE_MS) throw new HttpError(409, "This pager is not connected, so it cannot ring.");
+  if ((d.test_until ?? 0) <= now()) {
+    await c.env.DB.prepare(`UPDATE devices SET test_until = ? WHERE id = ?`).bind(now() + TEST_RING_MS, d.id).run();
+    c.env.publish(JSON.stringify({ type: "device.test" }));
+    c.env.wake();
+  }
+  return c.json({ ringing_ms: TEST_RING_MS });
 });
 
 devicesAdmin.delete("/:id", async (c) => {

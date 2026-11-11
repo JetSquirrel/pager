@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { app } from "./api";
 import { emptyUsage, POLL_SAMPLE, pressure, type Pressure, type Usage } from "./budget";
 import { Db, KvTable, migrate, type SqlLike } from "./db";
-import { deviceStateFor, openIncidents } from "./devices";
+import { deviceStateFor, endDeviceTests, nextDeviceTest, openIncidents, testingDevices } from "./devices";
 import { dueEscalations } from "./escalation";
 import { drainOutbox, nextDelivery } from "./notify/dispatch";
 import { nextSweep, sweepTuya } from "./notify/tuya-health";
@@ -56,7 +56,7 @@ export class Pager extends DurableObject<Bindings> {
       wake: { value: () => self.arm() },
       publish: { value: (message: string) => self.publish(message) },
       acceptClient: { value: (userId: string) => self.acceptSocket("client", userId, { type: "hello", at: now() }) },
-      acceptDevice: { value: (userId: string, state: unknown) => self.acceptSocket("device", userId, state) },
+      acceptDevice: { value: (userId: string, state: unknown, deviceId: string) => self.acceptSocket("device", userId, state, deviceId) },
       version: { value: () => self.version() },
       pressure: { value: () => self.pressureNow() },
       usageToday: { value: () => self.today() },
@@ -78,6 +78,7 @@ export class Pager extends DurableObject<Bindings> {
       await dueEscalations(this.view, now());
       await drainOutbox(this.view, now());
       await sweepTuya(this.view, now());
+      endDeviceTests(this.view, now());
       this.prune();
     } finally {
       this.arm();
@@ -91,6 +92,7 @@ export class Pager extends DurableObject<Bindings> {
       this.db.execute("SELECT MIN(next_at) AS at FROM escalations WHERE next_at IS NOT NULL", []).rows[0]?.at as number | null,
       nextDelivery(this.db),
       nextSweep(this.db, this.kv, !!(this.env.TUYA_CLIENT_ID && this.env.TUYA_CLIENT_SECRET)),
+      nextDeviceTest(this.db),
       Number(this.kv.read("pruned_at") ?? now()) + DAY,
     ].filter((x): x is number => x != null);
     void this.ctx.storage.setAlarm(Math.max(now(), Math.min(...due)));
@@ -134,10 +136,11 @@ export class Pager extends DurableObject<Bindings> {
     const devices = this.ctx.getWebSockets("device");
     if (devices.length === 0) return;
     const open = openIncidents(this.db);
+    const testing = testingDevices(this.db, now());
     for (const ws of devices) {
       try {
-        const { userId } = ws.deserializeAttachment() as { userId: string };
-        ws.send(JSON.stringify(deviceStateFor(userId, open, v)));
+        const { userId, deviceId } = ws.deserializeAttachment() as { userId: string; deviceId?: string };
+        ws.send(JSON.stringify(deviceStateFor(userId, open, v, now(), !!deviceId && testing.has(deviceId))));
       } catch {
         // closed socket
       }
@@ -145,10 +148,10 @@ export class Pager extends DurableObject<Bindings> {
   }
 
   /** "client": the app's live feed. "device": a hardware pager's long poll, waited out by the Worker (src/index.ts). */
-  private acceptSocket(tag: "client" | "device", userId: string, first: unknown): Response {
+  private acceptSocket(tag: "client" | "device", userId: string, first: unknown, deviceId?: string): Response {
     const [client, server] = Object.values(new WebSocketPair());
     this.ctx.acceptWebSocket(server, [tag]);
-    server.serializeAttachment({ userId });
+    server.serializeAttachment({ userId, deviceId });
     server.send(JSON.stringify(first));
     return new Response(null, { status: 101, webSocket: client });
   }
