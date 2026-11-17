@@ -8,7 +8,7 @@ escalates until someone acknowledges, and turns sirens off when they do.
 |---|---|---|
 | Cloud | One Cloudflare Worker and one SQLite Durable Object, on the free plan | [`cloud/`](cloud) |
 | Clients | One [NSH (Native Shell)](https://nsh.dev) TSX app: iOS, Android, macOS, Windows, Linux, web | [`app/`](app) |
-| Hardware | Tuya sirens, smart plugs and lights, driven through Tuya Cloud | [`docs/hardware-tuya.md`](docs/hardware-tuya.md) |
+| Hardware | Tuya sirens, smart plugs and lights through Tuya Cloud, and the T5AI board firmware | [`docs/hardware-tuya.md`](docs/hardware-tuya.md), [`hardware/pager-t5ai`](hardware/pager-t5ai) |
 
 ```
  Alertmanager / Grafana / curl ──► Worker /v1/integrations/{key}/…
@@ -126,12 +126,14 @@ All under `/v1`, `Authorization: Bearer <token>`.
 | GET/POST | `/incidents/{id}/customer-notices` | Tell customers ([rules](docs/alarm-permissions.md)) |
 | GET/POST/DELETE | `/customers` | Admin |
 | GET | `/oncall` | Who is on call now and next |
-| GET/POST/PUT | `/schedules`, `/schedules/{id}/overrides` | Rotations and take-overs |
+| GET/POST/PUT/DELETE | `/schedules`, `/schedules/{id}/overrides` | Rotations and take-overs |
 | GET/POST/PUT | `/escalation-policies`, `/{id}/preview` | |
 | GET/POST | `/services` | |
 | GET/POST/DELETE | `/users` | Admin |
 | GET/POST/PATCH/DELETE | `/contact-methods`, `/{id}/test` | Your own paging channels |
-| GET | `/tuya/presets`, `/tuya/devices/{id}/status` | |
+| GET/POST/DELETE | `/devices`, `/{id}/test` | Hardware pagers (T5AI boards); the token is shown once |
+| GET/POST | `/device/state` · `/device/ack` · `/device/snooze` | The board's own API (`Authorization: Device <token>`) |
+| GET | `/tuya/presets`, `/tuya/devices`, `/tuya/devices/{id}/status` | |
 | GET | `/push/vapid` | Public key for Web Push subscriptions |
 | GET | `/usage` | Admin: today's use of the free plan |
 | GET | `/health` | No auth. `budget` is `ok`, `lean` or `shed`: worth an uptime check |
