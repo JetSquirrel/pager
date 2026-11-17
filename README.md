@@ -126,13 +126,14 @@ All under `/v1`, `Authorization: Bearer <token>`.
 | GET/POST | `/incidents/{id}/customer-notices` | Tell customers ([rules](docs/alarm-permissions.md)) |
 | GET/POST/DELETE | `/customers` | Admin |
 | GET | `/oncall` | Who is on call now and next |
-| GET/POST/PUT/DELETE | `/schedules`, `/schedules/{id}/overrides` | Rotations and take-overs |
+| GET/POST/PUT | `/schedules`, `/schedules/{id}` | Rotations |
+| POST/DELETE | `/schedules/{id}/overrides`, `/{oid}` | Take-overs |
 | GET/POST/PUT | `/escalation-policies`, `/{id}/preview` | |
 | GET/POST | `/services` | |
 | GET/POST/DELETE | `/users` | Admin |
 | GET/POST/PATCH/DELETE | `/contact-methods`, `/{id}/test` | Your own paging channels |
-| GET/POST/DELETE | `/devices`, `/{id}/test` | Hardware pagers (T5AI boards); the token is shown once |
-| GET/POST | `/device/state` · `/device/ack` · `/device/snooze` | The board's own API (`Authorization: Device <token>`) |
+| GET/POST · DELETE | `/devices`, `/{id}/test` | Hardware pagers (T5AI boards); the token is shown once |
+| GET | `/device/state` · POST `/device/ack` · `/device/snooze` | The board's own API (`Authorization: Device <token>`) |
 | GET | `/tuya/presets`, `/tuya/devices`, `/tuya/devices/{id}/status` | |
 | GET | `/push/vapid` | Public key for Web Push subscriptions |
 | GET | `/usage` | Admin: today's use of the free plan |
