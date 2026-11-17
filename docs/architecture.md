@@ -1,64 +1,71 @@
 # Architecture
 
-## Cloud (Cloudflare)
+## Cloud (Cloudflare, free plan)
 
-| Piece | Cloudflare product | Why |
+```
+ Alertmanager / Grafana / curl ─┐                        ┌─ ntfy, Slack, webhook, Tuya, Web Push
+ NSH app, hardware pagers ──────┤                        │
+                                ▼                        │
+                 Worker ──► Durable Object `Pager` (SQLite) ──► one alarm: escalations + outbox
+                 holds long polls   incidents, people, schedules, sockets, usage
+```
+
+| Piece | What it is | Why |
 |---|---|---|
-| HTTP API, ingest, action links | Worker (Hono) | Global edge, no servers to keep up for the thing that wakes you when servers are down |
-| Incidents, users, schedules, policies, contact methods | D1 | Relational data; a partial unique index enforces one open incident per `(service, dedup_key)` |
-| Escalation timer | Durable Object `Escalator`, one per incident | DO alarms are durable timers: they survive deploys and restarts and fire exactly where the incident's state lives |
-| Live updates | Durable Object `Hub` with hibernating WebSockets | Every client holds one socket; idle sockets cost nothing |
-| Delivery | Queue `pager-notify` (+ DLQ) | One message per (incident, user, event); retried with backoff independently of the request that caused it |
-| Tuya access token cache | KV | Shared across isolates, expires itself |
-| Safety net | Cron (every 5 min) | Starts any escalation that a crashed request failed to start; prunes old delivery receipts |
+| Worker (`src/index.ts`) | Forwards `/v1/*` to the object; holds hardware long polls | A Worker is billed for CPU, so waiting here costs nothing |
+| `Pager` (`src/pager.ts`) | One SQLite-backed Durable Object with all state | A deploy creates it; an incident, its escalation and its pages are written together |
+| API (`src/api.ts`, Hono) | Runs inside the object | Reads and writes are synchronous local SQL |
+| Alarm | One timer, aimed at the next due escalation or delivery | Survives deploys and restarts; replaces per-incident timers, a queue and a cron |
+| Sockets | WebSocket hibernation, `ping` answered by the runtime | Idle clients cost nothing and never wake the object |
+
+There is nothing to provision: `wrangler deploy` creates the object, the schema migrates itself (`src/schema.ts`), and the
+action-link secret and the Web Push key pair are generated on first use and stored with the data. Because they live
+there, redeploying from any machine cannot rotate them and cut off subscribed phones.
+
+### Staying inside the free plan
+
+This is a hard rule, in [AGENTS.md](../AGENTS.md). `src/budget.ts` holds the limits; `test/budget.test.ts` simulates a
+busy day and fails above a fifth of the plan, and also fails if a query scans a large table.
+
+- **No polling where a push exists, and no waiting inside the object.** A pending `setTimeout` or `await` stops a
+  Durable Object from hibernating: one hardware pager long-polling inside it would use about 11,000 of the 13,000 GB-s a
+  day. So the object answers over a hibernating socket and the Worker does the waiting (`longPoll` in `src/index.ts`).
+- **Rows read are billed.** Hot queries use indexes; `incidents_open` keeps hardware polls off the incident history.
+- **The object meters itself.** `GET /v1/usage` and the Admin tab show today's use; `GET /v1/health` reports `budget`.
+- **Paging is never shed.** Past 40% of a daily limit the timeline stops recording repeats, past 70% delivery receipts.
+  Alert counts, escalations and pages carry on.
 
 ### Incident lifecycle
 
 1. **Ingest.** `/v1/integrations/{key}/{events|alertmanager|grafana}` parses the payload into `AlertEvent`s
-   (`src/ingest.ts`). A trigger whose `(service, dedup_key)` already has an open incident increments `alert_count`
-   instead of paging again.
-2. **Escalate.** A new incident starts its `Escalator`. Step 0 pages right away: each target resolves to users
-   (schedule targets → whoever is on call, overrides first, `src/oncall.ts`). The DO sets an alarm for the next step's
-   `delay_min`; after the last step it repeats the policy `repeat` times.
-3. **Notify.** Every paged user becomes a queue message; the consumer sends it through each of the user's enabled
-   contact methods whose `min_severity` the incident meets (`src/notify/dispatch.ts`). Results are written to the
-   incident's timeline (`notify_sent` / `notify_failed`). A message is retried only when *every* method failed, so a
-   working channel never double-pages.
-4. **Acknowledge / resolve** — from the app, a signed link in a notification, or the integration (`resolve` events,
-   Alertmanager `resolved`). This stops the escalator and sends `acknowledge` / `resolve` to everyone who was paged:
-   that is what switches Tuya sirens and lights off.
+   (`src/ingest.ts`). A trigger whose `(service, dedup_key)` already has an open incident increments `alert_count`.
+2. **Escalate.** A new incident gets a row in `escalations` and pages step 0 in the same turn. Schedule targets resolve
+   to whoever is on call, overrides first (`src/oncall.ts`). The alarm runs later steps at `next_at`; after the last
+   step the policy repeats `repeat` times.
+3. **Notify.** Each paged user's matching contact methods become rows in `outbox` (`src/notify/dispatch.ts`). A row is
+   one method, so a failed siren is retried (5 s to 60 s, six tries) without paging the phone that already rang. The
+   first failure and the final give-up go on the timeline; so does a paged person nothing can reach.
+4. **Acknowledge / resolve**, from the app, a signed link or the integration. This stops the escalation and queues
+   `acknowledge` / `resolve` to everyone paged: that is what switches sirens off and clears notifications on other devices.
 
 ### Paging channels
 
 | Type | Reaches | Notes |
 |---|---|---|
-| `ntfy` | iOS, Android, desktop, browser | Priority 5 for critical; notification buttons **Acknowledge** / **Resolve** call signed action URLs |
+| `webpush` | Browsers, Android, iPhone from the Home Screen | No third party. RFC 8291 and 8292 in `src/notify/webpush.ts`; `app/web/sw.js` shows Acknowledge and Resolve buttons |
+| `ntfy` | iOS, Android, desktop | For the native apps until they register for APNs and FCM |
 | `tuya` | Physical devices | Commands per event, presets for sirens, plugs and color lights ([hardware-tuya.md](hardware-tuya.md)) |
 | `slack` | Slack channel | Incoming webhook with an Acknowledge link |
 | `webhook` | Anything | JSON with the incident and signed action links |
-| in-app | NSH app while open | WebSocket → toast, list update, desktop window title `(n) Pager` |
+| in-app | NSH app while open | WebSocket: toast, list update, desktop window title `(n) Pager` |
 
 Signed action links (`src/actions.ts`) are `incident.user.kind.expiry.hmac`, valid 24 h. A GET shows a confirmation
-page (so link unfurlers and mail scanners never acknowledge anything); the POST acts.
+page, so link unfurlers and mail scanners never acknowledge anything; the POST acts.
 
 ## Clients (NSH)
 
-One TSX codebase (`app/`) on [Native Shell](https://nsh.dev): native views on iOS (UIKit), Android, macOS (AppKit),
-Windows, Linux (GTK 4) and the web (Wasm).
+One TSX codebase (`app/`) on [Native Shell](https://nsh.dev): iOS, Android, macOS, Windows, Linux (GTK 4) and the web (Wasm).
 
-- `src/store.ts` — session in `Storage`, open incidents in signals, a WebSocket to `/v1/stream` with backoff,
-  disconnect in the background / resync on return (`lifecycle()`), polling while offline, window title badge on
-  desktops (`nsh/desktop`).
-- Screens: sign-in, incidents (triggered / acknowledged with one-tap actions), incident detail (timeline, escalation,
-  notes, re-page), on-call (current, next, take over), settings (contact methods, test page).
-- `src/host.ts` + `host.js` — on the web the page is NSH's host: it gives the app its origin and URL hash, and shows
-  browser notifications (`Notification`) for new pages while the tab is in the background. Granted in `nsh.json`
-  `capabilities.host`.
-- Layout adapts with `platform.idiom === "desktop"`: tabs on top and a centered column on desktops and the web, a bottom tab bar
-  on phones.
-
-### Background paging on phones
-
-NSH does not ship a push-notification API yet. Until the app registers for APNs / FCM itself (a native module through
-NSH's `nativeModule` / `host` channel — planned), phones are paged through the `ntfy` channel, whose app handles
-background delivery and critical priority. The in-app socket covers the foreground.
+- `src/store.ts`: session in `Storage`, open incidents in signals, a WebSocket to `/v1/stream` with backoff, polling only while it is down.
+- `src/host.ts` + `host.js`: on the web the page is NSH's host. It gives the app its origin and URL hash, and subscribes the browser to Web Push. Granted in `nsh.json` `capabilities.host`.
+- Layout adapts with `platform.idiom === "desktop"`: tabs on top on desktops and the web, a bottom tab bar on phones.

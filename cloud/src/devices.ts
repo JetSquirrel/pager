@@ -4,7 +4,9 @@
 import { Hono } from "hono";
 import type { AppEnv } from "./auth";
 import { requireUser } from "./auth";
-import { acknowledge, rowToIncident } from "./incidents";
+import { DEVICE_SEEN_MS } from "./budget";
+import type { Db } from "./db";
+import { acknowledge, rowToIncident, snooze } from "./incidents";
 import type { Env, Incident, User } from "./types";
 import { HttpError, newId, newSecret, now, sha256Hex } from "./util";
 
@@ -25,13 +27,29 @@ export interface DeviceState {
 
 const SEV_ORDER = { critical: 3, error: 2, warning: 1, info: 0 } as const;
 
+/** How long a test ring lasts unless the board's button stops it first. */
+export const TEST_RING_MS = 10_000;
+/** Matches the app: a polling board writes last_seen every five minutes, so two misses and a margin means it is gone. */
+const BOARD_ONLINE_MS = 11 * 60_000;
+
 /** What a user's device should show now. Pure function of the user's open incidents (tested). */
-export function deviceStateFor(userId: string, open: Incident[], v: number, at = now()): DeviceState {
+export function deviceStateFor(userId: string, open: Incident[], v: number, at = now(), testing = false): DeviceState {
   const mine = open.filter((i) => i.assignees.includes(userId));
   const triggered = mine
     .filter((i) => i.status === "triggered")
     .sort((a, b) => SEV_ORDER[b.severity] - SEV_ORDER[a.severity] || b.created_at - a.created_at);
   const t = triggered[0];
+  // A real page always wins. count stays 0 so a real page arriving mid-test counts as new and clears a button mute.
+  if (testing && !t) {
+    return {
+      v,
+      alert: 1,
+      count: 0,
+      acked: mine.filter((i) => i.status === "acknowledged").length,
+      top: { id: "test", number: 0, title: "Test ring", severity: "critical", service: "Pager" },
+      now: at,
+    };
+  }
   return {
     v,
     alert: triggered.length ? 1 : 0,
@@ -42,15 +60,32 @@ export function deviceStateFor(userId: string, open: Incident[], v: number, at =
   };
 }
 
-async function openIncidents(env: Env): Promise<Incident[]> {
-  const { results } = await env.DB.prepare(
-    `SELECT i.*, s.name AS service_name FROM incidents i JOIN services s ON s.id = i.service_id
-      WHERE i.status != 'resolved' ORDER BY i.created_at DESC LIMIT 500`,
-  ).all<Record<string, unknown>>();
-  return results.map(rowToIncident);
+export function openIncidents(db: Db): Incident[] {
+  return db
+    .execute(
+      `SELECT i.*, s.name AS service_name FROM incidents i JOIN services s ON s.id = i.service_id
+        WHERE i.status != 'resolved' ORDER BY i.created_at DESC LIMIT 500`,
+      [],
+    )
+    .rows.map(rowToIncident);
 }
 
-type DeviceEnv = { Bindings: Env; Variables: { device: { id: string; user_id: string; name: string }; user: User } };
+export function testingDevices(db: Db, at: number): Set<string> {
+  return new Set(db.execute("SELECT id FROM devices WHERE test_until > ?", [at]).rows.map((r) => r.id as string));
+}
+
+export function nextDeviceTest(db: Db): number | null {
+  return db.execute("SELECT MIN(test_until) AS at FROM devices WHERE test_until IS NOT NULL", []).rows[0]?.at as number | null;
+}
+
+/** Runs from the alarm: tells the boards whose test is over to stop. */
+export function endDeviceTests(env: Env, at: number): void {
+  const { written } = env.DB.execute("UPDATE devices SET test_until = NULL WHERE test_until <= ?", [at]);
+  if (written) env.publish(JSON.stringify({ type: "device.test" }));
+}
+
+type DeviceRow = { id: string; user_id: string; name: string; last_seen_at: number | null; test_until: number | null };
+type DeviceEnv = { Bindings: Env; Variables: { device: DeviceRow; user: User } };
 
 // ------------------------------------------------------------------ the device's own API
 
@@ -60,9 +95,9 @@ deviceApi.use("*", async (c, next) => {
   const h = c.req.header("authorization") ?? "";
   const token = h.toLowerCase().startsWith("device ") ? h.slice(7).trim() : null;
   if (!token) throw new HttpError(401, "missing device token");
-  const device = await c.env.DB.prepare(`SELECT id, user_id, name FROM devices WHERE token_hash = ?`)
+  const device = await c.env.DB.prepare(`SELECT id, user_id, name, last_seen_at, test_until FROM devices WHERE token_hash = ?`)
     .bind(await sha256Hex(token))
-    .first<{ id: string; user_id: string; name: string }>();
+    .first<DeviceRow>();
   if (!device) throw new HttpError(401, "unknown device");
   c.set("device", device);
   await next();
@@ -71,28 +106,36 @@ deviceApi.use("*", async (c, next) => {
 /**
  * GET /v1/device/state?v=<last v>&wait=<seconds, max 25>
  * Returns at once when anything changed since v (or without v), else after the next change or the wait.
+ * The waiting is done by the Worker (src/index.ts); with an Upgrade header this answers over a hibernating socket.
  */
 deviceApi.get("/state", async (c) => {
   const d = c.get("device");
-  const hub = c.env.HUB.get(c.env.HUB.idFromName("global"));
-  const seen = Number(c.req.query("v") ?? NaN);
-  const wait = Math.min(25, Math.max(0, Number(c.req.query("wait") ?? 0)));
-  const v = Number.isFinite(seen) && wait > 0 ? await hub.waitForChange(seen, wait * 1000) : await hub.currentVersion();
-  const fw = c.req.header("x-firmware");
-  c.executionCtx.waitUntil(
-    c.env.DB.prepare(`UPDATE devices SET last_seen_at = ?, last_ip = ?, firmware = COALESCE(?, firmware) WHERE id = ?`)
-      .bind(now(), c.req.header("cf-connecting-ip") ?? null, fw ?? null, d.id)
-      .run(),
-  );
-  return c.json(deviceStateFor(d.user_id, await openIncidents(c.env), v));
+  if (d.last_seen_at === null || now() - d.last_seen_at >= DEVICE_SEEN_MS) {
+    await c.env.DB.prepare(`UPDATE devices SET last_seen_at = ?, last_ip = ?, firmware = COALESCE(?, firmware) WHERE id = ?`)
+      .bind(now(), c.req.header("cf-connecting-ip") ?? null, c.req.header("x-firmware") ?? null, d.id)
+      .run();
+  }
+  const state = deviceStateFor(d.user_id, openIncidents(c.env.DB), c.env.version(), now(), (d.test_until ?? 0) > now());
+  if (c.req.header("upgrade")?.toLowerCase() === "websocket") return c.env.acceptDevice(d.user_id, state, d.id);
+  return c.json(state);
 });
 
 /** POST /v1/device/ack — the button: acknowledges every incident currently paging this device's user. */
 deviceApi.post("/ack", async (c) => {
   const d = c.get("device");
-  const mine = (await openIncidents(c.env)).filter((i) => i.status === "triggered" && i.assignees.includes(d.user_id));
+  const mine = openIncidents(c.env.DB).filter((i) => i.status === "triggered" && i.assignees.includes(d.user_id));
   for (const i of mine) await acknowledge(c.env, c.executionCtx, i, d.user_id, `Acknowledged on ${d.name}`);
   return c.json({ acknowledged: mine.map((i) => i.number) });
+});
+
+/** POST /v1/device/snooze?minutes=30 — the long press: quiet now, and the page comes back if nobody has dealt with it. */
+deviceApi.post("/snooze", async (c) => {
+  const d = c.get("device");
+  const minutes = Number(c.req.query("minutes") ?? 30);
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 240) throw new HttpError(400, "minutes must be a whole number from 1 to 240");
+  const mine = openIncidents(c.env.DB).filter((i) => i.status === "triggered" && i.assignees.includes(d.user_id));
+  for (const i of mine) await snooze(c.env, c.executionCtx, i, d.user_id, minutes);
+  return c.json({ snoozed: mine.map((i) => i.number), minutes });
 });
 
 // ------------------------------------------------------------------ users managing their devices
@@ -118,6 +161,24 @@ devicesAdmin.post("/", async (c) => {
     .bind(id, c.get("user").id, (b.name || "T5AI pager").slice(0, 60), await sha256Hex(token), now())
     .run();
   return c.json({ id, token }, 201);
+});
+
+/**
+ * Rings the owner's board for a few seconds, through the same state a real page uses, so it proves the whole path.
+ * Costs only when someone presses the button; a second press during a ring writes nothing.
+ */
+devicesAdmin.post("/:id/test", async (c) => {
+  const d = await c.env.DB.prepare(`SELECT id, last_seen_at, test_until FROM devices WHERE id = ? AND user_id = ?`)
+    .bind(c.req.param("id"), c.get("user").id)
+    .first<Pick<DeviceRow, "id" | "last_seen_at" | "test_until">>();
+  if (!d) throw new HttpError(404, "no such pager");
+  if (d.last_seen_at === null || now() - d.last_seen_at >= BOARD_ONLINE_MS) throw new HttpError(409, "This pager is not connected, so it cannot ring.");
+  if ((d.test_until ?? 0) <= now()) {
+    await c.env.DB.prepare(`UPDATE devices SET test_until = ? WHERE id = ?`).bind(now() + TEST_RING_MS, d.id).run();
+    c.env.publish(JSON.stringify({ type: "device.test" }));
+    c.env.wake();
+  }
+  return c.json({ ringing_ms: TEST_RING_MS });
 });
 
 devicesAdmin.delete("/:id", async (c) => {

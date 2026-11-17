@@ -4,12 +4,16 @@
  *
  * The board long-polls the pager Worker (GET /v1/device/state?v=..&wait=20) with its device token. While an
  * incident pages its owner it flashes the LED and sounds a siren; a press of the button acknowledges every
- * page (POST /v1/device/ack). Settings live in flash and are set over the serial console:
+ * page (POST /v1/device/ack); holding it for two seconds snoozes them for 30 minutes instead (POST
+ * /v1/device/snooze). A board that has lost the server for 5 minutes chirps once a minute: a pager that cannot be
+ * reached must not look like one with nothing to say. Settings live in flash and are set over the serial console:
  *
  *   pager_wifi <ssid> [password]
  *   pager_url  http://192.168.1.20:8787  |  https://pager.example.com
  *   pager_token dev_xxxxxxxx
  *   pager_show       pager_test       pager_reboot
+ *   pager_audio      ring for 2 s and report what the microphone heard
+ *   pager_clear      forget the server and token; the board goes quiet until it is set up again
  *
  * LED: off = all clear · solid = acknowledged incidents still open · fast blink = PAGING ·
  *      slow blink = not configured / no Wi-Fi / server unreachable.
@@ -24,12 +28,14 @@
 #include "netmgr.h"
 #include "tal_api.h"
 #include "tal_cli.h"
+#include "tkl_gpio.h"
 #include "tkl_output.h"
 #if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
 #include "netconn_wifi.h"
 #endif
 
 #include "board_com_api.h"
+#include "tdd_audio.h"
 #include "tdl_audio_manage.h"
 #include "tdl_button_manage.h"
 #include "tdl_led_manage.h"
@@ -45,10 +51,19 @@
 #define KV_TOKEN "pg.token"
 
 #define LONG_POLL_S       20
+/* TuyaOpen gives a plain TCP read 5 s whatever the request asks for; only TLS honours the timeout. */
+#define LONG_POLL_PLAIN_S 3
 #define HTTP_TIMEOUT_MS   ((LONG_POLL_S + 10) * 1000)
 #define BACKOFF_MAX_MS    30000
 #define SAMPLE_RATE       16000
 #define SIREN_VOLUME      80
+#define PAGER_AUDIO_NAME  "pager_audio"
+#define SPK_EN_PIN        TUYA_GPIO_NUM_39 // amplifier enable on the T5AI-Core: high = on
+#define TEST_TONE_HZ      1000
+#define GOERTZEL_COEFF    1.847759f // 2*cos(2*pi*1000/16000), for TEST_TONE_HZ at SAMPLE_RATE
+#define SNOOZE_PATH       "/v1/device/snooze?minutes=30"
+#define OFFLINE_CHIRP_AFTER_MS (5 * 60 * 1000)
+#define OFFLINE_CHIRP_EVERY_MS (60 * 1000)
 
 extern const char PAGER_CA_BUNDLE[];
 extern const size_t PAGER_CA_BUNDLE_LEN;
@@ -95,6 +110,12 @@ static SEM_HANDLE sg_ack_sem;
 static SEM_HANDLE sg_wake_sem; // nudges the poller (new config, ack done)
 static volatile bool sg_net_up = false;
 static volatile bool sg_test_ring = false;
+static volatile bool sg_snooze_wanted = false; // the next post of sg_ack_sem means snooze, not acknowledge
+static volatile bool sg_mic_open = false;      // __mic_cb is adding up a measurement
+static volatile uint32_t sg_test_tone = 0;    // the alarm thread plays this frequency while it is non-zero
+static uint64_t sg_mic_tone;
+static uint32_t sg_mic_peak, sg_mic_frames;
+static volatile uint32_t sg_play_errors = 0;
 
 static TDL_LED_HANDLE_T sg_led;
 static TDL_AUDIO_HANDLE_T sg_audio;
@@ -298,7 +319,8 @@ static void __poll_task(void *arg)
         }
 
         if (sg_st.version > 0) {
-            snprintf(path, sizeof(path), "/v1/device/state?v=%.0f&wait=%d", sg_st.version, LONG_POLL_S);
+            snprintf(path, sizeof(path), "/v1/device/state?v=%.0f&wait=%d", sg_st.version,
+                     sg_cfg.tls ? LONG_POLL_S : LONG_POLL_PLAIN_S);
         } else {
             snprintf(path, sizeof(path), "/v1/device/state");
         }
@@ -324,12 +346,14 @@ static void __ack_task(void *arg)
     (void)arg;
     for (;;) {
         tal_semaphore_wait_forever(sg_ack_sem);
-        if (!__configured() || !sg_net_up) continue;
+        bool snooze = sg_snooze_wanted;
+        sg_snooze_wanted = false;
         cJSON *j = NULL;
-        int status = __pager_request("POST", "/v1/device/ack", 15000, &j);
+        /* No network means the press reached nobody: fall through and ring again, or the page is silently lost. */
+        int status = (__configured() && sg_net_up) ? __pager_request("POST", snooze ? SNOOZE_PATH : "/v1/device/ack", 15000, &j) : -1;
         if (status == 200) {
-            cJSON *list = j ? cJSON_GetObjectItem(j, "acknowledged") : NULL;
-            PR_NOTICE("acknowledged %d incident(s)", cJSON_IsArray(list) ? cJSON_GetArraySize(list) : 0);
+            cJSON *list = j ? cJSON_GetObjectItem(j, snooze ? "snoozed" : "acknowledged") : NULL;
+            PR_NOTICE("%s %d incident(s)", snooze ? "snoozed" : "acknowledged", cJSON_IsArray(list) ? cJSON_GetArraySize(list) : 0);
         } else {
             /* Didn't go through: ring again so the page isn't silently lost. */
             tal_mutex_lock(sg_mutex);
@@ -379,27 +403,81 @@ static void __play(uint32_t freq, uint32_t ms, int16_t amp)
         } else {
             memset(frame, 0, frame_bytes);
         }
-        tdl_audio_play(sg_audio, (uint8_t *)frame, frame_bytes);
+        if (tdl_audio_play(sg_audio, (uint8_t *)frame, frame_bytes) != OPRT_OK) sg_play_errors++;
     }
 }
 
-/** The codec also records; the pager has no use for the microphone. */
+/** Measures the test tone in each microphone frame (Goertzel), so room noise at other pitches does not count. */
 static void __mic_cb(TDL_AUDIO_FRAME_FORMAT_E type, TDL_AUDIO_STATUS_E status, uint8_t *data, uint32_t len)
 {
     (void)type;
     (void)status;
-    (void)data;
-    (void)len;
+    if (!sg_mic_open || !data || len < 2) return;
+    const int16_t *s = (const int16_t *)data;
+    uint32_t n = len / 2;
+    float q1 = 0, q2 = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        float q0 = GOERTZEL_COEFF * q1 - q2 + s[i];
+        q2 = q1;
+        q1 = q0;
+        uint32_t a = s[i] < 0 ? (uint32_t)(-(int32_t)s[i]) : (uint32_t)s[i];
+        if (a > sg_mic_peak) sg_mic_peak = a;
+    }
+    float power = q1 * q1 + q2 * q2 - GOERTZEL_COEFF * q1 * q2;
+    sg_mic_tone += (uint64_t)(4.0f * power / ((float)n * (float)n));
+    sg_mic_frames++;
+}
+
+static uint32_t __isqrt(uint64_t v)
+{
+    uint64_t r = 0, bit = 1ULL << 62;
+    while (bit > v) bit >>= 2;
+    while (bit) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (uint32_t)r;
+}
+
+typedef struct {
+    uint32_t tone;   // amplitude of the test tone the microphone heard, 0..32768
+    uint32_t peak;   // loudest sample
+    uint32_t frames; // 0 means the microphone delivered nothing
+} MIC_READING_T;
+
+/** Sets the amplifier and the test tone, lets them settle, and listens for `ms`. */
+static MIC_READING_T __mic_measure(bool amp_on, uint32_t tone_hz, uint32_t ms)
+{
+    MIC_READING_T r;
+    tkl_gpio_write(SPK_EN_PIN, amp_on ? TUYA_GPIO_LEVEL_HIGH : TUYA_GPIO_LEVEL_LOW);
+    sg_test_tone = tone_hz;
+    tal_system_sleep(300);
+    sg_mic_open = false;
+    sg_mic_tone = 0;
+    sg_mic_peak = sg_mic_frames = 0;
+    sg_mic_open = true;
+    tal_system_sleep(ms);
+    sg_mic_open = false;
+    r.frames = sg_mic_frames;
+    r.peak = sg_mic_peak;
+    r.tone = sg_mic_frames ? __isqrt(sg_mic_tone / sg_mic_frames) : 0;
+    return r;
 }
 
 /** Drives the LED and the siren from the current state. */
 static void __alarm_task(void *arg)
 {
     int led_mode = -1;
+    SYS_TIME_T lost_at = 0, chirped_at = 0;
     (void)arg;
     for (;;) {
         tal_mutex_lock(sg_mutex);
-        bool ring = (sg_st.alert && !sg_st.muted) || sg_test_ring;
+        bool ring = (sg_st.alert && !sg_st.muted) || sg_test_ring || sg_test_tone;
         bool critical = strcmp(sg_st.severity, "critical") == 0 || sg_test_ring;
         int mode = ring ? 3 : sg_st.alert ? 2 : sg_st.link != LINK_ONLINE ? 1 : sg_st.acked ? 2 : 0;
         tal_mutex_unlock(sg_mutex);
@@ -421,7 +499,9 @@ static void __alarm_task(void *arg)
             }
         }
 
-        if (ring) {
+        if (sg_test_tone) {
+            __play(sg_test_tone, 200, 24000);
+        } else if (ring) {
             if (critical) {
                 /* Two-tone siren. */
                 __play(960, 400, 24000);
@@ -435,6 +515,17 @@ static void __alarm_task(void *arg)
                 tal_system_sleep(2000);
             }
         } else {
+            /* Only a board that has been set up can be missing its server. */
+            SYS_TIME_T t = tal_system_get_millisecond();
+            if (sg_st.link != LINK_OFFLINE) {
+                lost_at = 0;
+            } else if (lost_at == 0) {
+                lost_at = t;
+            } else if (t - lost_at >= OFFLINE_CHIRP_AFTER_MS && t - chirped_at >= OFFLINE_CHIRP_EVERY_MS) {
+                chirped_at = t;
+                PR_WARN("server unreachable for %u s", (uint32_t)((t - lost_at) / 1000));
+                __play(1800, 80, 12000);
+            }
             tal_system_sleep(100);
         }
     }
@@ -452,9 +543,14 @@ static void __button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
             sg_test_ring = false;
             return;
         }
+        /* Silence at once. What the press means is known only when it ends: a tap acknowledges, a hold snoozes. */
+        tal_mutex_lock(sg_mutex);
+        sg_st.muted = true;
+        tal_mutex_unlock(sg_mutex);
+    } else if (event == TDL_BUTTON_PRESS_SINGLE_CLICK || event == TDL_BUTTON_PRESS_DOUBLE_CLICK ||
+               event == TDL_BUTTON_PRESS_REPEAT) {
         tal_mutex_lock(sg_mutex);
         bool alerting = sg_st.alert;
-        sg_st.muted = true; // silence at once; the server's answer confirms
         tal_mutex_unlock(sg_mutex);
         if (alerting) {
             PR_NOTICE("button: acknowledging");
@@ -463,6 +559,14 @@ static void __button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
     } else if (event == TDL_BUTTON_LONG_PRESS_START) {
         PR_NOTICE("button: link=%d alert=%d count=%d acked=%d %s", sg_st.link, sg_st.alert, sg_st.count, sg_st.acked,
                   sg_st.title);
+        tal_mutex_lock(sg_mutex);
+        bool alerting = sg_st.alert;
+        tal_mutex_unlock(sg_mutex);
+        if (alerting) {
+            PR_NOTICE("button: snoozing");
+            sg_snooze_wanted = true;
+            tal_semaphore_post(sg_ack_sem);
+        }
     }
 }
 
@@ -514,6 +618,22 @@ static void __cmd_token(int argc, char *argv[])
     tal_cli_echo("token saved\r\n");
 }
 
+static void __cmd_clear(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    tal_kv_del(KV_URL);
+    tal_kv_del(KV_TOKEN);
+    __load_cfg();
+    tal_mutex_lock(sg_mutex);
+    sg_st.alert = false;
+    sg_st.count = sg_st.acked = 0;
+    sg_st.version = 0;
+    tal_mutex_unlock(sg_mutex);
+    tal_semaphore_post(sg_wake_sem);
+    tal_cli_echo("server and token cleared\r\n");
+}
+
 static void __cmd_show(int argc, char *argv[])
 {
     char buf[400];
@@ -539,6 +659,40 @@ static void __cmd_test(int argc, char *argv[])
     sg_test_ring = false;
 }
 
+static void __cmd_audio(int argc, char *argv[])
+{
+    char buf[360];
+    (void)argc;
+    (void)argv;
+    if (!sg_audio) {
+        tal_cli_echo("no audio codec\r\n");
+        return;
+    }
+    if (sg_st.alert) {
+        tal_cli_echo("a page is ringing: try again when it is clear\r\n");
+        return;
+    }
+    uint32_t errors = sg_play_errors;
+    /* The amplifier-off reading is the control: a tone heard with it off leaked inside the chip, not through the air. */
+    MIC_READING_T room = __mic_measure(true, 0, 1000);
+    MIC_READING_T off = __mic_measure(false, TEST_TONE_HZ, 1500);
+    MIC_READING_T on = __mic_measure(true, TEST_TONE_HZ, 1500);
+    sg_test_tone = 0;
+    tkl_gpio_write(SPK_EN_PIN, TUYA_GPIO_LEVEL_HIGH);
+
+    uint32_t floor_tone = room.tone > off.tone ? room.tone : off.tone;
+    const char *verdict = !on.frames                      ? "NO (microphone gave no data)"
+                          : on.tone >= 3 * floor_tone + 20 ? "yes"
+                          : off.tone >= 3 * room.tone + 20 ? "NO (tone only leaks inside the chip; amplifier or speaker silent)"
+                                                           : "NO (nothing heard)";
+    snprintf(buf, sizeof(buf),
+             "room:        tone %u peak %u (%u frames)\r\namp off+tone: tone %u peak %u (%u frames)\r\n"
+             "amp on+tone:  tone %u peak %u (%u frames)\r\nplay errors: %u\r\nspeaker heard: %s\r\n",
+             room.tone, room.peak, room.frames, off.tone, off.peak, off.frames, on.tone, on.peak, on.frames,
+             sg_play_errors - errors, verdict);
+    tal_cli_echo(buf);
+}
+
 static void __cmd_reboot(int argc, char *argv[])
 {
     (void)argc;
@@ -550,8 +704,10 @@ static const cli_cmd_t sg_cmds[] = {
     {.name = "pager_wifi", .help = "pager_wifi <ssid> [password]", .func = __cmd_wifi},
     {.name = "pager_url", .help = "pager_url <http(s)://host[:port]>", .func = __cmd_url},
     {.name = "pager_token", .help = "pager_token <dev_...>", .func = __cmd_token},
+    {.name = "pager_clear", .help = "forget the server and token", .func = __cmd_clear},
     {.name = "pager_show", .help = "show settings and state", .func = __cmd_show},
     {.name = "pager_test", .help = "ring for 5 seconds", .func = __cmd_test},
+    {.name = "pager_audio", .help = "ring for 2 seconds and report what the microphone heard", .func = __cmd_audio},
     {.name = "pager_reboot", .help = "reboot", .func = __cmd_reboot},
 };
 
@@ -602,11 +758,25 @@ static void user_main(void)
     TDL_BUTTON_HANDLE button = NULL;
     if (tdl_button_create(BUTTON_NAME, &button_cfg, &button) == OPRT_OK) {
         tdl_button_event_register(button, TDL_BUTTON_PRESS_DOWN, __button_cb);
+        tdl_button_event_register(button, TDL_BUTTON_PRESS_SINGLE_CLICK, __button_cb);
+        tdl_button_event_register(button, TDL_BUTTON_PRESS_DOUBLE_CLICK, __button_cb);
+        tdl_button_event_register(button, TDL_BUTTON_PRESS_REPEAT, __button_cb);
         tdl_button_event_register(button, TDL_BUTTON_LONG_PRESS_START, __button_cb);
     }
 
 #if defined(AUDIO_CODEC_NAME)
-    if (tdl_audio_find(AUDIO_CODEC_NAME, &sg_audio) == OPRT_OK && tdl_audio_open(sg_audio, __mic_cb) == OPRT_OK) {
+    /* The board's own registration turns echo cancellation on, which is for talking and removes the very siren
+       pager_audio listens for. A pager never talks, so open the codec without it. */
+    TDD_AUDIO_T5AI_T audio_cfg = {.aec_enable = 0,
+                                  .ai_chn = TKL_AI_0,
+                                  .sample_rate = TKL_AUDIO_SAMPLE_16K,
+                                  .data_bits = TKL_AUDIO_DATABITS_16,
+                                  .channel = TKL_AUDIO_CHANNEL_MONO,
+                                  .spk_sample_rate = TKL_AUDIO_SAMPLE_16K,
+                                  .spk_pin = SPK_EN_PIN,
+                                  .spk_pin_polarity = TUYA_GPIO_LEVEL_LOW};
+    if (tdd_audio_register(PAGER_AUDIO_NAME, audio_cfg) == OPRT_OK && tdl_audio_find(PAGER_AUDIO_NAME, &sg_audio) == OPRT_OK &&
+        tdl_audio_open(sg_audio, __mic_cb) == OPRT_OK) {
         tdl_audio_get_info(sg_audio, &sg_audio_info);
         tdl_audio_volume_set(sg_audio, SIREN_VOLUME);
         PR_NOTICE("audio: frame %u bytes, %u ms", sg_audio_info.frame_size, sg_audio_info.sample_tm_ms);

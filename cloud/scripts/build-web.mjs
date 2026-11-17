@@ -1,7 +1,8 @@
-// Packages the NSH app for the web and puts it where the Worker serves it (/app/).
+// Packages the NSH app for the web and puts it where the Worker serves it (/app/), adding what `nsh package` has no
+// place for: the push service worker at the app's root.
 // Usage: npm run build:web   (needs the `nsh` CLI on PATH)
 import { execSync } from "node:child_process";
-import { cpSync, rmSync } from "node:fs";
+import { copyFileSync, cpSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -12,4 +13,5 @@ const out = join(root, "cloud", "public", "app");
 execSync("nsh package . --target web", { cwd: app, stdio: "inherit" });
 rmSync(out, { recursive: true, force: true });
 cpSync(join(app, ".nsh", "out", "Pager"), out, { recursive: true });
+copyFileSync(join(app, "web", "sw.js"), join(out, "sw.js"));
 console.log(`web app copied to ${out}`);

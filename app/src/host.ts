@@ -11,10 +11,10 @@ const has = () => {
   }
 };
 
-async function call<T>(name: string, data?: unknown): Promise<T | null> {
+async function call<T>(name: string, data?: unknown, timeout = 2000): Promise<T | null> {
   if (!has()) return null;
   try {
-    return await host.call<T>(name, data, { timeout: 2000 });
+    return await host.call<T>(name, data, { timeout });
   } catch {
     return null;
   }
@@ -28,6 +28,27 @@ export const requestNotifications = () => call<string>("requestNotifications");
 
 /** A system notification while the app is in the background (web: a browser notification). */
 export const notify = (n: { title: string; body?: string; tag?: string; severity?: Severity }) => call<boolean>("notify", n);
+
+export interface PushState {
+  supported: boolean;
+  ios: boolean;
+  standalone: boolean;
+  endpoint: string | null;
+  permission?: "granted" | "denied" | "default" | "unsupported";
+}
+
+export type PushSubscribed = { endpoint: string; keys: { p256dh: string; auth: string }; label: string } | { error: string };
+
+/** Whether this browser can be paged with the app closed. Null where there is no page around the app. */
+export const pushState = () => call<PushState>("pushState");
+
+/** Asks for permission and subscribes. The wait covers the person answering the browser's prompt. */
+export const pushEnable = (publicKey: string) => call<PushSubscribed>("pushEnable", { publicKey }, 120_000);
+
+/** Calls back when the URL hash changes while the app is running (a notification was tapped). */
+export function onOpen(fn: (hash: string) => void) {
+  if (has()) host.on("open", (data: unknown) => fn((data as { hash?: string })?.hash ?? ""));
+}
 
 /** "#/incidents/inc_123" → "inc_123". */
 export function incidentFromHash(hash: string | undefined | null): string | null {

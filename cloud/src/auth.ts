@@ -16,7 +16,7 @@ export const requireUser: MiddlewareHandler<AppEnv> = async (c, next) => {
   const token = bearer(c);
   if (!token) throw new HttpError(401, "missing bearer token");
   const user = await c.env.DB.prepare(
-    `SELECT id, email, name, role, timezone, created_at FROM users WHERE token_hash = ?`,
+    `SELECT id, email, name, role, can_notify_customers, timezone, created_at FROM users WHERE token_hash = ?`,
   )
     .bind(await sha256Hex(token))
     .first<User>();

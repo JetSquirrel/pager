@@ -8,6 +8,7 @@ export interface User {
   email: string;
   name: string;
   role: "admin" | "responder";
+  can_notify_customers?: number;
 }
 
 export interface Incident {
@@ -28,6 +29,7 @@ export interface Incident {
   acknowledged_at: number | null;
   acknowledged_by: string | null;
   resolved_at: number | null;
+  snoozed_until: number | null;
 }
 
 export interface IncidentEvent {
@@ -61,11 +63,13 @@ export interface OnCall {
 
 export interface ContactMethod {
   id: string;
-  type: "tuya" | "ntfy" | "webhook" | "slack";
+  type: "tuya" | "ntfy" | "webhook" | "slack" | "webpush";
   label: string;
   config: Record<string, unknown>;
   min_severity: Severity;
   enabled: boolean;
+  delay_min: number;
+  last_error: string | null;
 }
 
 export interface Service {
@@ -93,6 +97,48 @@ export interface ScheduleDef {
   id: string;
   name: string;
   rotation: { start: number; shift_hours: number; users: string[] };
+}
+
+export type CustomerChannel = "webhook" | "slack" | "ntfy";
+
+export interface Customer {
+  id: string;
+  name: string;
+  type: CustomerChannel;
+  config: Record<string, unknown>;
+  service_id: string | null;
+  enabled: boolean;
+}
+
+export interface TuyaDevice {
+  id: string;
+  name: string;
+  category: string;
+  online: boolean;
+  suggested_preset: string | null;
+}
+
+export interface HardwarePager {
+  id: string;
+  name: string;
+  last_seen_at: number | null;
+  firmware: string | null;
+}
+
+export interface CustomerNotice {
+  id: string;
+  message: string;
+  audience: number;
+  dry_run: number;
+  created_at: number;
+}
+
+export interface UsageToday {
+  requests: number;
+  rowsRead: number;
+  rowsWritten: number;
+  free: { requests: number; rowsRead: number; rowsWritten: number };
+  pressure: "ok" | "lean" | "shed";
 }
 
 export interface Session {
@@ -137,6 +183,11 @@ export class Api {
   incident = (id: string) => this.call<IncidentDetail>("GET", `/incidents/${id}`);
   acknowledge = (id: string) => this.call<{ incident: Incident }>("POST", `/incidents/${id}/acknowledge`);
   resolve = (id: string) => this.call<{ incident: Incident }>("POST", `/incidents/${id}/resolve`);
+  snooze = (id: string, minutes: number) => this.call<{ incident: Incident }>("POST", `/incidents/${id}/snooze`, { minutes });
+  reassign = (id: string, userId: string) => this.call<{ incident: Incident }>("POST", `/incidents/${id}/reassign`, { user_id: userId });
+  escalate = (id: string) => this.call<{ incident: Incident }>("POST", `/incidents/${id}/escalate`);
+  bulk = (action: "acknowledge" | "resolve", ids: string[]) => this.call<{ incidents: Incident[] }>("POST", "/incidents/bulk", { action, ids });
+  openIncident = (i: { service_id: string; title: string; severity: Severity }) => this.call<{ incident: Incident }>("POST", "/incidents", i);
   repage = (id: string) => this.call<{ ok: true }>("POST", `/incidents/${id}/repage`);
   note = (id: string, message: string) => this.call<{ ok: true }>("POST", `/incidents/${id}/notes`, { message });
   oncall = () => this.call<OnCall>("GET", "/oncall");
@@ -145,15 +196,31 @@ export class Api {
   contactMethods = () => this.call<{ contact_methods: ContactMethod[]; tuya_presets: string[] }>("GET", "/contact-methods");
   addContactMethod = (cm: { type: string; label: string; config: Record<string, unknown>; min_severity?: Severity }) =>
     this.call<{ id: string }>("POST", "/contact-methods", cm);
-  updateContactMethod = (id: string, patch: { enabled?: boolean; min_severity?: Severity; label?: string }) =>
+  updateContactMethod = (id: string, patch: { enabled?: boolean; min_severity?: Severity; label?: string; delay_min?: number }) =>
     this.call<{ ok: true }>("PATCH", `/contact-methods/${id}`, patch);
   deleteContactMethod = (id: string) => this.call<void>("DELETE", `/contact-methods/${id}`);
   testContactMethod = (id: string) => this.call<{ ok: true }>("POST", `/contact-methods/${id}/test`);
 
+  tuyaDevices = () => this.call<{ configured: boolean; devices: TuyaDevice[] }>("GET", "/tuya/devices");
+  hardwarePagers = () => this.call<{ devices: HardwarePager[] }>("GET", "/devices");
+  addHardwarePager = (name: string) => this.call<{ id: string; token: string }>("POST", "/devices", { name });
+  deleteHardwarePager = (id: string) => this.call<void>("DELETE", `/devices/${id}`);
+  testHardwarePager = (id: string) => this.call<{ ringing_ms: number }>("POST", `/devices/${id}/test`);
+
+  pushKey = () => this.call<{ publicKey: string }>("GET", "/push/vapid");
+
+  customerNotices = (id: string) => this.call<{ audience: number; live: boolean; allowed: boolean; notices: CustomerNotice[] }>("GET", `/incidents/${id}/customer-notices`);
+  sendCustomerNotice = (id: string, message: string) => this.call<{ id: string; audience: number; dry_run: boolean }>("POST", `/incidents/${id}/customer-notices`, { message });
+
   // ---- admin
+  usage = () => this.call<UsageToday>("GET", "/usage");
   users = () => this.call<{ users: User[] }>("GET", "/users");
   addUser = (u: { email: string; name: string; role: "admin" | "responder" }) =>
     this.call<{ user_id: string; token: string }>("POST", "/users", u);
+  updateUser = (id: string, patch: { role?: "admin" | "responder"; can_notify_customers?: boolean }) => this.call<{ ok: true }>("PATCH", `/users/${id}`, patch);
+  customers = () => this.call<{ customers: Customer[]; live: boolean }>("GET", "/customers");
+  addCustomer = (c: { name: string; type: CustomerChannel; config: Record<string, unknown>; service_id?: string | null }) => this.call<{ id: string }>("POST", "/customers", c);
+  deleteCustomer = (id: string) => this.call<void>("DELETE", `/customers/${id}`);
   services = () => this.call<{ services: Service[] }>("GET", "/services");
   addService = (s: { name: string; escalation_policy_id: string }) =>
     this.call<{ id: string; integration_key: string }>("POST", "/services", s);

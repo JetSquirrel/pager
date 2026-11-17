@@ -28,15 +28,20 @@ that turns red, a plug that powers a rotating beacon. The Worker drives it throu
 
 ## Adding a device (per user)
 
-In the app: **Settings → Add → Tuya**, paste the device id (Tuya platform → Devices, or the device's info page in the
-Smart Life app), pick a preset, then **Send test** — the device goes off and is cleared 15 seconds later.
+In the app: **Settings → Add → Tuya**, pick the device from the list (or paste its id), leave the commands on **Auto**,
+then **Send test**: the device goes off and is cleared 15 seconds later.
+
+Auto reads the device's specification from Tuya and builds the commands: a siren at its loudest and longest, a color
+light red for critical and amber otherwise, anything else with a switch turned on. A preset or custom commands are
+checked against the same specification when you save, so a code the device does not have is refused then instead of
+failing during a page.
 
 Or with the API:
 
 ```sh
 curl -X POST $B/v1/contact-methods -H "Authorization: Bearer $T" -d '{
   "type": "tuya", "label": "Desk siren", "min_severity": "error",
-  "config": { "device_id": "vdevo1234567890", "preset": "siren" }
+  "config": { "device_id": "vdevo1234567890", "preset": "auto" }
 }'
 ```
 
@@ -64,5 +69,50 @@ Any device works with its own data points. Look them up under Tuya platform → 
 }
 ```
 
-The clear commands are sent on acknowledge **and** resolve to every user that was paged, regardless of their
+The clear commands are sent on acknowledge, resolve, snooze and reassign to every user that was paged, regardless of their
 `min_severity`, so nothing keeps ringing after someone has picked it up.
+
+## When a device stops answering
+
+Before paging, the Worker asks Tuya whether the device is online: an offline siren is a failed delivery on the
+incident's timeline, retried and then given up on out loud, because Tuya would accept the command either way.
+
+Every 30 minutes the Worker checks each enabled device. One that has gone offline shows in **Settings → Alarm check**,
+and its owner hears about it once on their other channels.
+
+## T5AI board
+
+Register one under **Settings → Hardware pagers**; the token is shown once, for `pager_token` on the serial console.
+
+| Button | Effect |
+|---|---|
+| Press | Acknowledge everything paging you |
+| Hold 2 s | Snooze it for 30 minutes |
+
+A press that cannot reach the server rings again rather than staying silent. After 5 minutes without the server the
+board chirps once a minute; `pager_clear` on the serial console forgets the server and token and quiets it.
+
+The settings console is the board's user UART at 115200 baud (the lower-numbered of its two USB ports on the T5AI-Core);
+the other port carries the chip's log at 460800. The board has 2.4 GHz Wi-Fi only.
+
+**Settings → Hardware pagers → Send test** rings a connected board for 10 seconds through the same state a real page
+uses, and the button stops it early. It never changes or mutes a real page.
+
+### Checking the speaker
+
+Plug the speaker into the **SPK** connector. The **BAT** connector next to the USB port is for a battery and carries
+charging voltage.
+
+`pager_audio` on the serial console plays a 1 kHz tone for about 4 seconds and answers whether the microphone heard it.
+It listens to the room, to the tone with the amplifier off, then to the tone with the amplifier on (GPIO39 high), and
+measures only 1 kHz, so room noise at other pitches does not count. The firmware opens the codec without echo
+cancellation, which would remove the tone and, through its voice detector, stop the microphone data altogether. The
+answer is `yes` or `NO` with the reason; `NO` needs the microphone within reach of the speaker to mean anything. A
+reading says the speaker made sound, not how loud it is across the room. It refuses to run while a page is ringing.
+
+### Reaching the server
+
+The board resolves the server's name through the local network's DNS and has no proxy support, so it needs a hostname
+that network can really reach. `*.workers.dev` is poisoned on mainland China networks: use a custom domain there. The
+production pager is `https://pager.jetsquirrel.cloud`; `workers_dev` stays on so clients saved with the old address keep
+working.

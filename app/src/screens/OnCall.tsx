@@ -1,79 +1,120 @@
-import { resource, Scroll, Text, View } from "nsh";
-import { AlertDialog } from "nsh/base";
+import { resource, Text, View } from "nsh";
 import type { OnCall as OnCallData, Shift } from "../api";
 import { api, me } from "../store";
 import { toast } from "../toast";
-import { Btn, clock, Empty, SectionTitle, until } from "../ui";
+import { ActionMenu, Badge, clock, Empty, Failed, Loading, MenuBtn, Meta, Page, Row, Section, Surface, until } from "../ui";
 
 type Sched = OnCallData["schedules"][number];
 
-function ShiftLine(props: { shift: () => Shift }) {
+function NextShift(props: { shift: () => Shift }) {
   return (
-    <View class="flex-row justify-between gap-2">
-      <Text class="text-card-foreground">{props.shift().user?.name ?? "unknown"}</Text>
-      <Text class="text-muted-foreground">{clock(props.shift().starts_at)}</Text>
-    </View>
+    <Row>
+      <Text class="flex-1 text-sm text-card-foreground" numberOfLines={1}>
+        {props.shift().user?.name ?? "Unknown"}
+      </Text>
+      <Meta>{clock(props.shift().starts_at)}</Meta>
+    </Row>
+  );
+}
+
+function Schedule(props: { schedule: () => Sched; reload: () => void }) {
+  const s = () => props.schedule();
+  const mine = () => s().current?.user_id === me()?.id;
+  const take = async (ms: number | "shift") => {
+    const start = Date.now();
+    const end = ms === "shift" ? (s().current?.ends_at ?? start + 3_600_000) : start + ms;
+    try {
+      await api().takeShift(s().id, start, end);
+      props.reload();
+      toast(`You are on call for ${s().name}`);
+    } catch (e) {
+      toast(String((e as Error).message ?? e), "error");
+    }
+  };
+  return (
+    <Surface>
+      <View class="flex-row items-center gap-3 p-3">
+        <View class="flex-1 gap-1">
+          <Meta>{s().name}</Meta>
+          <View class="flex-row items-center gap-1.5">
+            <Text class="text-lg font-semibold text-card-foreground" numberOfLines={1}>
+              {s().current?.user?.name ?? "Nobody"}
+            </Text>
+            {mine() && <Badge label="You" />}
+            {s().current?.override && <Badge label="Override" />}
+          </View>
+          {s().current && <Meta>Ends in {until(s().current!.ends_at)}</Meta>}
+        </View>
+        <If when={!mine()}>
+          <ActionMenu
+            trigger={<MenuBtn title="Take over" testID={`take-over-${s().id}`} />}
+            items={[
+              { label: "For 1 hour", onSelect: () => take(3_600_000) },
+              { label: "For 4 hours", onSelect: () => take(4 * 3_600_000) },
+              { label: "Until the shift ends", onSelect: () => take("shift") },
+            ]}
+          />
+        </If>
+      </View>
+      <Each of={s().next.slice(0, 4)} key="index">
+        {(n) => <NextShift shift={n} />}
+      </Each>
+    </Surface>
+  );
+}
+
+/** The one question an on-call person opens this for: am I on, and when am I next? */
+function MyShifts(props: { schedules: () => Sched[] }) {
+  const now = () => props.schedules().filter((s) => s.current?.user_id === me()?.id);
+  const next = () =>
+    props
+      .schedules()
+      .flatMap((s) => s.next.filter((n) => n.user_id === me()?.id).map((n) => ({ name: s.name, starts_at: n.starts_at })))
+      .sort((a, b) => a.starts_at - b.starts_at)
+      .slice(0, 3);
+  return (
+    <Section title="Your shifts">
+      <Surface>
+        {now().map((s) => (
+          <Row testID="on-call-now">
+            <View><Badge label="On call" tone="ok" /></View>
+            <Text class="flex-1 text-sm font-medium text-card-foreground" numberOfLines={1}>{s.name}</Text>
+            <Meta>Ends in {until(s.current!.ends_at)}</Meta>
+          </Row>
+        ))}
+        {next().map((n) => (
+          <Row>
+            <Text class="flex-1 text-sm text-card-foreground" numberOfLines={1}>{n.name}</Text>
+            <Meta>{clock(n.starts_at)}</Meta>
+          </Row>
+        ))}
+        <If when={now().length + next().length === 0}>
+          <Row><Meta>No shifts in the next two weeks</Meta></Row>
+        </If>
+      </Surface>
+    </Section>
   );
 }
 
 export function OnCall() {
   const data = resource(async () => api().oncall());
-
-  const takeOver = async (s: Sched) => {
-    const action = await AlertDialog.show({
-      title: `Take over ${s.name}?`,
-      description: "You will be on call instead of the current person.",
-      actions: [
-        { label: "For 1 hour", id: "1" },
-        { label: "For 4 hours", id: "4" },
-        { label: "Until the shift ends", id: "shift" },
-        { label: "Cancel", role: "cancel", id: "cancel" },
-      ],
-    });
-    if (!action || action === "cancel") return;
-    const start = Date.now();
-    const end = action === "shift" ? (s.current?.ends_at ?? start + 3_600_000) : start + Number(action) * 3_600_000;
-    try {
-      await api().takeShift(s.id, start, end);
-      data.refetch();
-      toast(`You are on call for ${s.name}`);
-    } catch (e) {
-      toast(String((e as Error).message ?? e), "error");
-    }
-  };
-
   return (
-    <Scroll class="flex-1 bg-background">
-      <View class="w-full max-w-3xl gap-3 self-center p-4">
-        <If when={data()} else={<Text class="p-2 text-muted-foreground">{data.error() ? String(data.error()) : "Loading…"}</Text>}>
-          {(d) => (
-            <If when={d().schedules.length > 0} else={<Empty title="No schedules" hint="An admin can create one with the API." />}>
+    <Page>
+      <If when={data()} else={data.error() ? <Failed error={data.error()} onRetry={() => data.refetch()} /> : <Loading />}>
+        {(d) => (
+          <If
+            when={d().schedules.length > 0}
+            else={<Empty icon="calendar" title="No rotations" hint={me()?.role === "admin" ? "Create one in Admin." : "An admin can create one."} />}
+          >
+            <View class="gap-3">
+              <MyShifts schedules={() => d().schedules} />
               <Each of={d().schedules} key={(s: Sched) => s.id}>
-                {(s) => (
-                  <View class="gap-2 rounded-xl border border-border bg-card p-4">
-                    <Text class="text-sm font-semibold uppercase text-muted-foreground">{s().name}</Text>
-                    <View class="flex-row items-center gap-2">
-                      <Text class="flex-1 text-xl font-bold text-card-foreground">
-                        {s().current?.user?.name ?? "Nobody"}
-                        {s().current?.user_id === me()?.id ? " (you)" : ""}
-                      </Text>
-                      {s().current?.override && <Text class="text-xs text-muted-foreground">override</Text>}
-                    </View>
-                    {s().current && <Text class="text-muted-foreground">for {until(s().current!.ends_at)} more</Text>}
-                    {s().current?.user_id !== me()?.id && <Btn title="Take over" variant="ghost" onPress={() => takeOver(s())} />}
-                    <If when={s().next.length > 0}>
-                      <SectionTitle title="Next" />
-                      <Each of={s().next.slice(0, 4)} key="index">
-                        {(n) => <ShiftLine shift={n} />}
-                      </Each>
-                    </If>
-                  </View>
-                )}
+                {(s) => <Schedule schedule={s} reload={() => data.refetch()} />}
               </Each>
-            </If>
-          )}
-        </If>
-      </View>
-    </Scroll>
+            </View>
+          </If>
+        )}
+      </If>
+    </Page>
   );
 }
