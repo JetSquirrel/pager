@@ -35,7 +35,7 @@ bash scripts/smoke.sh                    # end-to-end check against a fresh loca
 npm test                                 # unit tests
 ```
 
-Then the app (needs the [`nsh` CLI](https://nsh.dev/docs/installation.md), tested with 0.3.0):
+Then the app (needs the [`nsh` CLI](https://nsh.dev/docs/installation.md), tested with 0.6.1):
 
 ```sh
 cd app

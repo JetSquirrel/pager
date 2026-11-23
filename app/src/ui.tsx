@@ -104,7 +104,7 @@ export const StatusBadge = (props: { status: Status }) => <Badge label={STATUS_L
 /** Secondary text. */
 export function Meta(props: { children: JSX.Element; selectable?: boolean }) {
   return (
-    <Text class="text-xs text-muted-foreground" style={{ fontVariant: ["tabular-nums"] }} selectable={props.selectable}>
+    <Text class={`text-xs text-muted-foreground ${props.selectable ? "select-text" : ""}`} style={{ fontVariant: ["tabular-nums"] }}>
       {props.children}
     </Text>
   );
@@ -234,7 +234,7 @@ export function Segmented<T extends string>(props: { options: { value: T; label:
           onPress={() => props.onChange(o.value)}
           class={`group items-center justify-center rounded-md hover:bg-accent selected:bg-card ${isDesktop ? "min-h-7 px-3" : props.hug ? "min-h-10 px-3" : "min-h-10 flex-1 px-1"} ${FOCUS}`}
         >
-          <Text class="text-sm font-medium text-muted-foreground group-selected:text-foreground" numberOfLines={1}>
+          <Text class="text-sm font-medium text-muted-foreground group-selected:text-foreground line-clamp-1">
             {o.label}
           </Text>
         </Tab>
@@ -308,7 +308,7 @@ export function Header(props: { title: string; onBack?: () => void; right?: JSX.
     <View class="border-b border-border bg-background pt-[env(safe-area-inset-top)]">
       <View class={`flex-row items-center gap-1 ${props.onBack ? "pl-1 pr-3" : "px-4"} ${isDesktop ? "min-h-12" : "min-h-14"}`}>
         {props.onBack && <IconBtn icon="back" label="Back" onPress={props.onBack} />}
-        <Text class="flex-1 text-base font-semibold text-foreground" numberOfLines={1}>
+        <Text class="flex-1 text-base font-semibold text-foreground line-clamp-1">
           {props.title}
         </Text>
         {props.right}

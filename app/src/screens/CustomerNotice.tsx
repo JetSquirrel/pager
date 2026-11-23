@@ -12,7 +12,7 @@ export function CustomerNotice(props: { id: string; open: boolean; onClose: () =
   const people = (n: number) => `${n} ${n === 1 ? "customer" : "customers"}`;
 
   const send = async (audience: number, live: boolean) => {
-    const answer = await AlertDialog.show({
+    const { action: answer } = await AlertDialog.show({
       title: live ? `Send to ${people(audience)}?` : "Run a dry run?",
       description: live ? "This can't be taken back." : `Nobody is contacted. The timeline records that ${people(audience)} would have been.`,
       actions: [
@@ -44,7 +44,7 @@ export function CustomerNotice(props: { id: string; open: boolean; onClose: () =
               <Callout title="Dry run: customer notices are switched off, nobody is contacted." />
             </If>
             <Field label="Message" hint="Customers see this and the service name, nothing else.">
-              <Input testID="notice-message" value={text()} onChange={(v) => text.set(v)} multiline placeholder="Checkout is failing for some customers. We are working on it." class={field} />
+              <Input testID="notice-message" value={text()} onChange={({ value }) => text.set(value)} multiline placeholder="Checkout is failing for some customers. We are working on it." class={field} />
             </Field>
             <If when={d().audience > 0} else={<Callout tone="critical" title="No customers are listed for this service. Add them in Admin." />}>
               <Btn title={d().live ? `Send to ${people(d().audience)}` : `Dry run for ${people(d().audience)}`} busy={busy()} disabled={!text().trim() || !d().allowed} onPress={() => send(d().audience, d().live)} />
@@ -52,7 +52,7 @@ export function CustomerNotice(props: { id: string; open: boolean; onClose: () =
             {d().notices.map((n) => (
               <View class="gap-0.5">
                 <Meta>{`${clock(n.created_at)}  ${n.dry_run ? "Dry run" : people(n.audience)}`}</Meta>
-                <Text class="text-sm text-card-foreground" selectable>{n.message}</Text>
+                <Text class="text-sm text-card-foreground select-text">{n.message}</Text>
               </View>
             ))}
           </View>

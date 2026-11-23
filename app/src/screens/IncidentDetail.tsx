@@ -55,7 +55,7 @@ function TimelineItem(props: { event: () => IncidentEvent; last: boolean }) {
           <View class="flex-1" />
           <Meta>{clock(e().at)}</Meta>
         </View>
-        {e().message && e().message !== label() && <Text class="text-sm text-foreground" selectable>{e().message}</Text>}
+        {e().message && e().message !== label() && <Text class="text-sm text-foreground select-text">{e().message}</Text>}
       </View>
     </View>
   );
@@ -118,7 +118,7 @@ export function IncidentDetail(props: { id: string }) {
                 <StatusBadge status={d().incident.status} />
                 <Meta>#{d().incident.number}</Meta>
               </View>
-              <Text class="text-xl font-semibold text-foreground" selectable>
+              <Text class="text-xl font-semibold text-foreground select-text">
                 {d().incident.title}
               </Text>
               <View class="flex-row flex-wrap gap-x-3 gap-y-0.5">
@@ -188,7 +188,7 @@ export function IncidentDetail(props: { id: string }) {
             <If when={Object.keys(d().incident.details).length > 0}>
               <Section title="Details">
                 <View class="rounded-(--radius) bg-muted p-3">
-                  <Text class="font-mono text-xs text-foreground" selectable>
+                  <Text class="font-mono text-xs text-foreground select-text">
                     {JSON.stringify(d().incident.details, null, 2)}
                   </Text>
                 </View>
@@ -206,7 +206,7 @@ export function IncidentDetail(props: { id: string }) {
             <View class="flex-row items-end gap-2">
               <Input
                 value={note()}
-                onChange={(value) => note.set(value)}
+                onChange={({ value }) => note.set(value)}
                 placeholder="Add a note"
                 accessibilityLabel="Note"
                 multiline
