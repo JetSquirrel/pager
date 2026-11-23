@@ -9,6 +9,7 @@ escalates until someone acknowledges, and turns sirens off when they do.
 | Cloud | One Cloudflare Worker and one SQLite Durable Object, on the free plan | [`cloud/`](cloud) |
 | Clients | One [NSH (Native Shell)](https://nsh.dev) TSX app: iOS, Android, macOS, Windows, Linux, web | [`app/`](app) |
 | Hardware | Tuya sirens, smart plugs and lights through Tuya Cloud, and the T5AI board firmware | [`docs/hardware-tuya.md`](docs/hardware-tuya.md), [`hardware/pager-t5ai`](hardware/pager-t5ai) |
+| Voice | Optional: the T5AI board reads pages out and takes spoken ack / snooze / resolve, through Doubao speech; runs outside Cloudflare | [`voice/`](voice) |
 
 ```
  Alertmanager / Grafana / curl ──► Worker /v1/integrations/{key}/…
@@ -133,7 +134,7 @@ All under `/v1`, `Authorization: Bearer <token>`.
 | GET/POST/DELETE | `/users` | Admin |
 | GET/POST/PATCH/DELETE | `/contact-methods`, `/{id}/test` | Your own paging channels |
 | GET/POST · DELETE | `/devices`, `/{id}/test` | Hardware pagers (T5AI boards); the token is shown once |
-| GET | `/device/state` · POST `/device/ack` · `/device/snooze` | The board's own API (`Authorization: Device <token>`) |
+| GET | `/device/state` · POST `/device/ack` · `/device/snooze` · `/device/resolve?id=` | The board's own API (`Authorization: Device <token>`); resolve closes only the incident named, for voice mode |
 | GET | `/tuya/presets`, `/tuya/devices`, `/tuya/devices/{id}/status` | |
 | GET | `/push/vapid` | Public key for Web Push subscriptions |
 | GET | `/usage` | Admin: today's use of the free plan |

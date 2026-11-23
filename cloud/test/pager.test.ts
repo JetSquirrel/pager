@@ -457,6 +457,23 @@ describe("hardware pagers", () => {
     expect((await h.call("GET", "/v1/device/state", { device })).json).toMatchObject({ alert: 0, acked: 1 });
   });
 
+  it("resolves by voice only the incident the board announced, and only its user's", async () => {
+    const { T, B, key } = await seed(h);
+    const device = (await h.call("POST", "/v1/devices", { token: T, body: { name: "Desk" } })).json.token;
+    const other = (await h.call("POST", "/v1/devices", { token: B, body: { name: "Attic" } })).json.token;
+    await fire(key);
+    const { top } = (await h.call("GET", "/v1/device/state", { device })).json;
+    await h.call("POST", "/v1/device/ack", { device });
+
+    expect((await h.call("POST", "/v1/device/resolve", { device })).status).toBe(404); // nothing named
+    expect((await h.call("POST", "/v1/device/resolve?id=nope", { device })).status).toBe(404);
+    expect((await h.call("POST", `/v1/device/resolve?id=${top.id}`, { device: other })).status).toBe(404); // not paged
+
+    expect((await h.call("POST", `/v1/device/resolve?id=${top.id}`, { device })).json).toEqual({ resolved: [top.number] });
+    expect((await h.call("GET", "/v1/device/state", { device })).json).toMatchObject({ alert: 0, acked: 0 });
+    expect((await h.call("POST", `/v1/device/resolve?id=${top.id}`, { device })).json).toEqual({ resolved: [top.number] }); // again: no-op
+  });
+
   it("a test press rings only that board, and the alarm stops it", async () => {
     const { T, B } = await seed(h);
     const desk = (await h.call("POST", "/v1/devices", { token: T, body: { name: "Desk" } })).json;

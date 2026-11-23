@@ -1,12 +1,13 @@
 // Hardware pagers (hardware/pager-t5ai firmware). Two sets of routes:
 //   /v1/devices/*  — a signed-in user registers, lists and removes their devices (user token)
-//   /v1/device/*   — the device itself: long-poll its state, acknowledge (device token, "Authorization: Device <token>")
+//   /v1/device/*   — the device itself: long-poll its state, acknowledge, snooze, resolve what it announced
+//                    (device token, "Authorization: Device <token>")
 import { Hono } from "hono";
 import type { AppEnv } from "./auth";
 import { requireUser } from "./auth";
 import { DEVICE_SEEN_MS } from "./budget";
 import type { Db } from "./db";
-import { acknowledge, rowToIncident, snooze } from "./incidents";
+import { acknowledge, getIncident, resolve, rowToIncident, snooze } from "./incidents";
 import type { Env, Incident, User } from "./types";
 import { HttpError, newId, newSecret, now, sha256Hex } from "./util";
 
@@ -136,6 +137,20 @@ deviceApi.post("/snooze", async (c) => {
   const mine = openIncidents(c.env.DB).filter((i) => i.status === "triggered" && i.assignees.includes(d.user_id));
   for (const i of mine) await snooze(c.env, c.executionCtx, i, d.user_id, minutes);
   return c.json({ snoozed: mine.map((i) => i.number), minutes });
+});
+
+/**
+ * POST /v1/device/resolve?id=<incident id> — a spoken "resolved": closes the one incident the board announced, never
+ * every open one, because a misheard word must not close incidents nobody named. It has to be open and the board's
+ * user one of its assignees, whether it still pages or was acknowledged earlier.
+ */
+deviceApi.post("/resolve", async (c) => {
+  const d = c.get("device");
+  const id = c.req.query("id") ?? "";
+  const incident = id ? await getIncident(c.env, id) : null;
+  if (!incident || !incident.assignees.includes(d.user_id)) throw new HttpError(404, "no such incident for this pager");
+  if (incident.status !== "resolved") await resolve(c.env, c.executionCtx, incident, d.user_id, `Resolved on ${d.name}`);
+  return c.json({ resolved: [incident.number] });
 });
 
 // ------------------------------------------------------------------ users managing their devices
