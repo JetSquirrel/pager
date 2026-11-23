@@ -48,7 +48,7 @@ function IncidentRow(props: { incident: () => Incident; selected: boolean; onOpe
   return (
     <Row selected={props.selected} onPress={() => props.onOpen(i().id)}>
       <View class="flex-1 gap-1">
-        <Text class={`font-medium text-card-foreground ${isDesktop ? "text-sm" : "text-base"}`} numberOfLines={2}>
+        <Text class={`font-medium text-card-foreground ${isDesktop ? "text-sm" : "text-base"} line-clamp-2`}>
           {i().title}
         </Text>
         <View class="flex-row flex-wrap items-center gap-x-2.5 gap-y-0.5">
@@ -95,7 +95,7 @@ function NewIncident(props: { open: boolean; onClose: () => void; onCreated: (id
   return (
     <FormSheet open={props.open} onClose={props.onClose} title="New incident">
       <Field label="What is wrong">
-        <Input testID="incident-title" value={title()} onChange={(v) => title.set(v)} placeholder="Checkout is returning 500s" class={field} />
+        <Input testID="incident-title" value={title()} onChange={({ value }) => title.set(value)} placeholder="Checkout is returning 500s" class={field} />
       </Field>
       <Field label="Service">
         <If when={services()} else={services.error() ? <Failed error={services.error()} onRetry={() => services.refetch()} /> : <Loading />}>

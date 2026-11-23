@@ -26,7 +26,7 @@ export function Toaster() {
       <ToastStack
         placement="topCenter"
         class="w-80"
-        onExpandedChange={(e) => expanded.set(e)}
+        onExpandedChange={(e) => expanded.set(e.expanded)}
         onCancel={() => {
           const newest = shown().filter((t) => t.status !== "ending").at(-1);
           if (newest) {
@@ -49,7 +49,7 @@ export function Toaster() {
               endingClass="opacity-0 scale-95"
             >
               <Dot tone={(t().value as Value).severity} />
-              <Text class="flex-1 text-sm font-medium text-popover-foreground" numberOfLines={2}>
+              <Text class="flex-1 text-sm font-medium text-popover-foreground line-clamp-2">
                 {(t().value as Value).title}
               </Text>
             </Toast>

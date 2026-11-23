@@ -168,5 +168,5 @@ setInterval(() => {
 // Desktop: show the count of unacknowledged pages in the window title (taskbar, Dock, window switcher).
 effect(() => {
   const n = triggered().length;
-  if (hasWindow) Window.setTitle(n > 0 ? `(${n}) Pager` : "Pager");
+  if (hasWindow) Window.get("main")?.set({ title: n > 0 ? `(${n}) Pager` : "Pager" });
 });

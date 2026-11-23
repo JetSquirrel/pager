@@ -9,7 +9,7 @@ type Sched = OnCallData["schedules"][number];
 function NextShift(props: { shift: () => Shift }) {
   return (
     <Row>
-      <Text class="flex-1 text-sm text-card-foreground" numberOfLines={1}>
+      <Text class="flex-1 text-sm text-card-foreground line-clamp-1">
         {props.shift().user?.name ?? "Unknown"}
       </Text>
       <Meta>{clock(props.shift().starts_at)}</Meta>
@@ -37,7 +37,7 @@ function Schedule(props: { schedule: () => Sched; reload: () => void }) {
         <View class="flex-1 gap-1">
           <Meta>{s().name}</Meta>
           <View class="flex-row items-center gap-1.5">
-            <Text class="text-lg font-semibold text-card-foreground" numberOfLines={1}>
+            <Text class="text-lg font-semibold text-card-foreground line-clamp-1">
               {s().current?.user?.name ?? "Nobody"}
             </Text>
             {mine() && <Badge label="You" />}
@@ -78,13 +78,13 @@ function MyShifts(props: { schedules: () => Sched[] }) {
         {now().map((s) => (
           <Row testID="on-call-now">
             <View><Badge label="On call" tone="ok" /></View>
-            <Text class="flex-1 text-sm font-medium text-card-foreground" numberOfLines={1}>{s.name}</Text>
+            <Text class="flex-1 text-sm font-medium text-card-foreground line-clamp-1">{s.name}</Text>
             <Meta>Ends in {until(s.current!.ends_at)}</Meta>
           </Row>
         ))}
         {next().map((n) => (
           <Row>
-            <Text class="flex-1 text-sm text-card-foreground" numberOfLines={1}>{n.name}</Text>
+            <Text class="flex-1 text-sm text-card-foreground line-clamp-1">{n.name}</Text>
             <Meta>{clock(n.starts_at)}</Meta>
           </Row>
         ))}

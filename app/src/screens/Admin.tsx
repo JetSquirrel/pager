@@ -31,7 +31,7 @@ async function copy(text: string, what: string) {
   }
 }
 
-const Name = (props: { children: string }) => <Text class="text-sm font-medium text-card-foreground" numberOfLines={1}>{props.children}</Text>;
+const Name = (props: { children: string }) => <Text class="text-sm font-medium text-card-foreground line-clamp-1">{props.children}</Text>;
 
 function AddButton(props: { title: string; onPress: () => void }) {
   return <Btn title={props.title} variant="ghost" icon="plus" onPress={props.onPress} />;
@@ -83,7 +83,7 @@ function Services(props: { d: () => Data; reload: () => void }) {
       </If>
       <FormSheet open={open()} onClose={() => open.set(false)} title="New service">
         <Field label="Name">
-          <Input testID="service-name" value={name()} onChange={(v) => name.set(v)} placeholder="Checkout API" class={field} />
+          <Input testID="service-name" value={name()} onChange={({ value }) => name.set(value)} placeholder="Checkout API" class={field} />
         </Field>
         <Field label="Escalation policy" hint={props.d().policies.length === 0 ? "Create an escalation policy first." : undefined}>
           <Chips
@@ -160,7 +160,7 @@ function Policies(props: { d: () => Data; reload: () => void }) {
       </If>
       <FormSheet open={open()} onClose={() => open.set(false)} title="New escalation policy">
         <Field label="Name">
-          <Input testID="policy-name" value={name()} onChange={(v) => name.set(v)} placeholder="Default" class={field} />
+          <Input testID="policy-name" value={name()} onChange={({ value }) => name.set(value)} placeholder="Default" class={field} />
         </Field>
         <Field label="Page at once">
           <Chips testID="policy-first" options={options()} selected={first()} onToggle={toggle(first)} />
@@ -171,12 +171,12 @@ function Policies(props: { d: () => Data; reload: () => void }) {
         <View class="flex-row gap-3">
           <View class="flex-1">
             <Field label="After minutes">
-              <Input value={delay()} onChange={(v) => delay.set(v)} keyboardType="number-pad" class={field} />
+              <Input value={delay()} onChange={({ value }) => delay.set(value)} keyboardType="number-pad" class={field} />
             </Field>
           </View>
           <View class="flex-1">
             <Field label="Repeat times">
-              <Input value={repeat()} onChange={(v) => repeat.set(v)} keyboardType="number-pad" class={field} />
+              <Input value={repeat()} onChange={({ value }) => repeat.set(value)} keyboardType="number-pad" class={field} />
             </Field>
           </View>
         </View>
@@ -229,7 +229,7 @@ function Schedules(props: { d: () => Data; reload: () => void }) {
       </If>
       <FormSheet open={open()} onClose={() => open.set(false)} title="New rotation">
         <Field label="Name">
-          <Input testID="schedule-name" value={name()} onChange={(v) => name.set(v)} placeholder="Primary" class={field} />
+          <Input testID="schedule-name" value={name()} onChange={({ value }) => name.set(value)} placeholder="Primary" class={field} />
         </Field>
         <Field label="Who, in order" hint="The first one starts now.">
           <Chips
@@ -274,7 +274,7 @@ function People(props: { d: () => Data; reload: () => void }) {
         <If when={issued()}>
           {(t) => (
             <Callout title={`Token for ${t().name}, shown once`}>
-              <Text class="font-mono text-xs text-foreground" selectable>{t().token}</Text>
+              <Text class="font-mono text-xs text-foreground select-text">{t().token}</Text>
               <View class="flex-row gap-2">
                 <Btn title="Copy token" variant="secondary" icon="copy" onPress={() => copy(t().token, "Token")} />
                 <Btn title="Done" variant="ghost" onPress={() => issued.set(null)} />
@@ -295,7 +295,7 @@ function People(props: { d: () => Data; reload: () => void }) {
                   <Switch
                     checked={!!u.can_notify_customers}
                     accessibilityLabel={`${u.name} may notify customers`}
-                    onChange={(checked) => api().updateUser(u.id, { can_notify_customers: checked }).then(props.reload, fail)}
+                    onChange={({ checked }) => api().updateUser(u.id, { can_notify_customers: checked }).then(props.reload, fail)}
                     trackClass="w-9 rounded-full bg-input p-0.5 transition-colors checked:bg-primary"
                     thumbClass="size-4 rounded-full bg-card shadow-sm transition-transform checked:translate-x-4"
                   />
@@ -309,10 +309,10 @@ function People(props: { d: () => Data; reload: () => void }) {
       </View>
       <FormSheet open={open()} onClose={() => open.set(false)} title="Add person">
         <Field label="Email">
-          <Input testID="user-email" value={email()} onChange={(v) => email.set(v)} placeholder="alice@example.com" autoCapitalize="none" keyboardType="email-address" class={field} />
+          <Input testID="user-email" value={email()} onChange={({ value }) => email.set(value)} placeholder="alice@example.com" autoCapitalize="none" keyboardType="email-address" class={field} />
         </Field>
         <Field label="Name">
-          <Input testID="user-name" value={name()} onChange={(v) => name.set(v)} placeholder="Alice" class={field} />
+          <Input testID="user-name" value={name()} onChange={({ value }) => name.set(value)} placeholder="Alice" class={field} />
         </Field>
         <Field label="Role">
           <Segmented options={[{ value: "responder", label: "Responder" }, { value: "admin", label: "Admin" }]} value={role()} onChange={(v) => role.set(v as "responder" | "admin")} />
@@ -378,13 +378,13 @@ function Customers(props: { d: () => Data }) {
       </If>
       <FormSheet open={open()} onClose={() => open.set(false)} title="Add customer">
         <Field label="Name">
-          <Input testID="customer-name" value={name()} onChange={(v) => name.set(v)} placeholder="Acme Inc" class={field} />
+          <Input testID="customer-name" value={name()} onChange={({ value }) => name.set(value)} placeholder="Acme Inc" class={field} />
         </Field>
         <Field label="Channel">
           <Segmented testID="customer-channel" options={CHANNELS} value={channel()} onChange={(v) => (channel.set(v), target.set(""))} />
         </Field>
         <Field label={meta().field}>
-          <Input testID="customer-target" value={target()} onChange={(v) => target.set(v)} autoCapitalize="none" autoCorrect={false} class={field} />
+          <Input testID="customer-target" value={target()} onChange={({ value }) => target.set(value)} autoCapitalize="none" autoCorrect={false} class={field} />
         </Field>
         <Field label="Service" hint="None selected means every service.">
           <Chips testID="customer-service" options={props.d().services.map((s) => ({ id: s.id, label: s.name }))} selected={service() ? [service()!] : []} onToggle={(id) => service.update((v) => (v === id ? null : id))} />

@@ -38,7 +38,7 @@ export function Login() {
             <Input
               testID="server"
               value={server()}
-              onChange={(value) => server.set(value)}
+              onChange={({ value }) => server.set(value)}
               placeholder="https://pager.example.com"
               autoCapitalize="none"
               autoCorrect={false}
@@ -51,7 +51,7 @@ export function Login() {
             <Input
               testID="token"
               value={token_()}
-              onChange={(value) => token_.set(value)}
+              onChange={({ value }) => token_.set(value)}
               placeholder="From your admin"
               autoCapitalize="none"
               autoCorrect={false}

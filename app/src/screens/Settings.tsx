@@ -60,7 +60,7 @@ function MethodRow(props: { cm: () => ContactMethod; reload: () => void }) {
     }
   };
   const remove = async () => {
-    const action = await AlertDialog.show({
+    const { action } = await AlertDialog.show({
       title: `Remove ${name()}?`,
       description: "It stops getting pages. Its settings are not kept.",
       actions: [
@@ -76,16 +76,16 @@ function MethodRow(props: { cm: () => ContactMethod; reload: () => void }) {
         <View class="flex-row items-center gap-3">
           <Icon name={ICON[cm().type] ?? "bell"} size={16} tint={token("muted-foreground")} />
           <View class="flex-1">
-            <Text class="text-sm font-medium text-card-foreground" numberOfLines={1}>{name()}</Text>
-            <Text class="text-xs text-muted-foreground" numberOfLines={1}>{describe(cm())}</Text>
+            <Text class="text-sm font-medium text-card-foreground line-clamp-1">{name()}</Text>
+            <Text class="text-xs text-muted-foreground line-clamp-1">{describe(cm())}</Text>
             <If when={cm().last_error}>
-              <Text class="text-xs text-destructive" numberOfLines={2}>{cm().last_error}</Text>
+              <Text class="text-xs text-destructive line-clamp-2">{cm().last_error}</Text>
             </If>
           </View>
           <Switch
             checked={cm().enabled}
             accessibilityLabel={`Page ${name()}`}
-            onChange={(checked) => guard(() => api().updateContactMethod(cm().id, { enabled: checked }))}
+            onChange={({ checked }) => guard(() => api().updateContactMethod(cm().id, { enabled: checked }))}
             trackClass="w-9 rounded-full bg-input p-0.5 transition-colors checked:bg-primary"
             thumbClass="size-4 rounded-full bg-card shadow-sm transition-transform checked:translate-x-4"
           />
@@ -160,7 +160,7 @@ function AddMethod(props: { open: boolean; onClose: () => void; presets: string[
         <Text class="text-xs text-muted-foreground">{KINDS.find((k) => k.value === kind())!.hint}</Text>
       </View>
       <Field label="Label">
-        <Input value={label()} onChange={(value) => label.set(value)} placeholder="Desk siren" class={field} />
+        <Input value={label()} onChange={({ value }) => label.set(value)} placeholder="Desk siren" class={field} />
       </Field>
       <If when={kind() === "tuya" && tuya()?.configured && tuya()!.devices.length > 0}>
         <Field label="Your devices">
@@ -176,11 +176,11 @@ function AddMethod(props: { open: boolean; onClose: () => void; presets: string[
         </Field>
       </If>
       <Field label={kind() === "ntfy" ? "Topic" : kind() === "tuya" ? "Device ID" : "URL"} hint={kind() === "ntfy" ? "Long and random, like pager-alice-7f3k9q." : undefined}>
-        <Input value={a()} onChange={(value) => a.set(value)} autoCapitalize="none" autoCorrect={false} placeholder={kind() === "ntfy" || kind() === "tuya" ? "" : "https://…"} class={field} />
+        <Input value={a()} onChange={({ value }) => a.set(value)} autoCapitalize="none" autoCorrect={false} placeholder={kind() === "ntfy" || kind() === "tuya" ? "" : "https://…"} class={field} />
       </Field>
       <If when={kind() === "ntfy"}>
         <Field label="Server">
-          <Input value={b()} onChange={(value) => b.set(value)} autoCapitalize="none" placeholder="https://ntfy.sh" class={field} />
+          <Input value={b()} onChange={({ value }) => b.set(value)} autoCapitalize="none" placeholder="https://ntfy.sh" class={field} />
         </Field>
       </If>
       <If when={kind() === "tuya"}>
@@ -309,7 +309,7 @@ function HardwarePagers(props: { list: Boards }) {
         <If when={issued()}>
           {(t) => (
             <Callout title="Token, shown once. On the board: pager_token">
-              <Text class="font-mono text-xs text-foreground" selectable>{t()}</Text>
+              <Text class="font-mono text-xs text-foreground select-text">{t()}</Text>
               <View class="flex-row gap-2">
                 <Btn title="Copy token" variant="secondary" icon="copy" onPress={() => Clipboard.writeText(t()).then(() => toast("Token copied"))} />
                 <Btn title="Done" variant="ghost" onPress={() => issued.set(null)} />
@@ -323,7 +323,7 @@ function HardwarePagers(props: { list: Boards }) {
               <Row>
                 <Dot tone={boardOnline(d) ? "ok" : "critical"} />
                 <View class="flex-1 gap-0.5">
-                  <Text class="text-sm font-medium text-card-foreground" numberOfLines={1}>{d.name}</Text>
+                  <Text class="text-sm font-medium text-card-foreground line-clamp-1">{d.name}</Text>
                   <Meta>{boardOnline(d) ? "Online" : d.last_seen_at ? `Last seen ${timeAgo(d.last_seen_at)}` : "Never connected"}{d.firmware ? `  ${d.firmware}` : ""}</Meta>
                 </View>
                 <If when={boardOnline(d)}>
@@ -351,7 +351,7 @@ export function Settings() {
           <Row>
             <View class="flex-1 gap-0.5">
               <View class="flex-row items-center gap-1.5">
-                <Text class="text-sm font-medium text-card-foreground" numberOfLines={1}>{me()?.name}</Text>
+                <Text class="text-sm font-medium text-card-foreground line-clamp-1">{me()?.name}</Text>
                 <If when={me()?.role === "admin"}>
                   <Badge label="Admin" />
                 </If>

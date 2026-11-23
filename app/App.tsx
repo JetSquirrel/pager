@@ -71,7 +71,7 @@ function Sidebar() {
       </Tabs>
       <View class="flex-1" />
       <View class="gap-1 border-t border-sidebar-border p-4">
-        <Text class="text-sm font-medium text-sidebar-foreground" numberOfLines={1}>
+        <Text class="text-sm font-medium text-sidebar-foreground line-clamp-1">
           {me()?.name}
         </Text>
         <LiveStatus />
